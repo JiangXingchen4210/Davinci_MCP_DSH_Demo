@@ -1470,7 +1470,8 @@ window.__ModuleLoader__.load({
       const confirmDelivery = async () => {
         if (!deliverPlan?.confirmToken) return
         const value = await run('render.deliver', { confirmToken: deliverPlan.confirmToken, width: deliverWidth, height: deliverHeight, fps: deliverFps, bitrateMbps: deliverBitrate }, '确认渲染')
-        if (value) setDeliverPlan({ ...deliverPlan, confirmed: value })
+        if (value?.ok && value?.jobId) setDeliverPlan({ ...deliverPlan, confirmed: value, confirmError: null })
+        else setDeliverPlan({ ...deliverPlan, confirmError: value?.error ?? '渲染未启动（后端未返回任务 ID）' })
       }
       const fixPipelineOneClick = async () => {
         const value = await run('pipeline.oneClickFix', {}, t('pipeline.fixOneClick'))
@@ -1982,7 +1983,11 @@ window.__ModuleLoader__.load({
         deliverPlan
           ? h('div', null,
               h('div', { style: S.hint }, `方案：${deliverPlan.plan?.width}×${deliverPlan.plan?.height} / ${deliverPlan.plan?.fps}fps / ${deliverPlan.plan?.bitrateMbps}Mbps / ${deliverPlan.plan?.container} → ${deliverPlan.plan?.targetDir}`),
-              deliverPlan.confirmed ? h('div', { style: S.hint }, `已提交渲染：job ${deliverPlan.confirmed.jobId ?? '—'}`) : h('div', { style: S.hint }, '等待确认（确认后才会渲染）'),
+              deliverPlan.confirmed
+                ? h('div', { style: S.hint }, `已启动渲染：job ${deliverPlan.confirmed.jobId}（规格已核对）`)
+                : deliverPlan.confirmError
+                  ? h('div', { style: S.error }, `交付失败：${deliverPlan.confirmError}`)
+                  : h('div', { style: S.hint }, '等待确认（确认后才会渲染）'),
             )
           : null,
       )

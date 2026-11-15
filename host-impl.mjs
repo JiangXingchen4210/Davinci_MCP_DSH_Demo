@@ -3155,6 +3155,7 @@ async function opPreviewRender(ctx, args, signal) {
   previewState.renderInProgress = true
   let jobId = null
   let started = null
+  let status = null
   try {
   const prepared = await settle(
     callTool(
@@ -3179,7 +3180,6 @@ async function opPreviewRender(ctx, args, signal) {
   started = await settle(callTool(ctx, 'render', { action: 'start', params: { job_ids: [jobId] } }, signal))
   // 轮询（最多 args.waitSec 秒；预览片很短）
   const deadline = Date.now() + Math.min(600, Math.max(20, Number(args.waitSec) || 120)) * 1000
-  let status = null
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1200))
     const polled = await settle(callTool(ctx, 'render', { action: 'get_job_status', params: { job_id: jobId } }, signal))
@@ -3822,10 +3822,12 @@ async function opStyleOneClick(ctx, args, signal) {
     results.push({ itemId, restore: Boolean(restore?.ok), restoreLut: restore?.lutPath ? path.basename(String(restore.lutPath)) : null, restoreError: restore?.error ?? null, grade: Boolean(built?.ok), nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: Boolean(filmLut?.ok), mist: mist ? Boolean(mist.ok) : null })
   }
   debugPush({ stage: '风格', message: `风格「${style.label}」完成：${results.filter((item) => item.grade).length}/${results.length} 条（还原：${results.filter((i) => i.restore).length} 条；风格 LUT：${style.filmLut ? '用' : '不用'}；柔光：${style.mist ? style.mist.mode : '不用'}）` })
+  const succeeded = results.filter((item) => item.grade && item.restore)
   return {
-    ok: results.every((item) => item.grade),
+    ok: results.length > 0 && succeeded.length === results.length,
     style: { key: style.key, label: style.label, sources: style.sources, techniques: style.techniques },
-    applied: results.filter((item) => item.grade).length,
+    applied: succeeded.length,
+    failed: results.filter((item) => !(item.grade && item.restore)).map((item) => ({ itemId: item.itemId, grade: item.grade, restore: item.restore, restoreError: item.restoreError })),
     total: results.length,
     results,
     note: '风格 = 影调+色彩分离+局部+质感；LUT/柔光只在风格配方要求时使用；还原按机型单独处理',
@@ -3896,62 +3898,134 @@ async function opRenderDeliver(ctx, args, signal) {
   if (!plan.scope?.project || !nowScope.project || plan.scope.project !== nowScope.project) {
     return { ok: false, error: `确认令牌与当前项目不匹配（方案项目：${plan.scope?.project ?? '未知'}，当前：${nowScope.project ?? '未知'}）；请重新生成方案`, plan }
   }
-  if (!plan.scope?.timeline || !nowScope.timeline || plan.scope.timeline !== nowScope.timeline) {
-    return { ok: false, error: `确认令牌与当前时间线不匹配（方案时间线：${plan.scope?.timeline ?? '未知'}，当前：${nowScope.timeline ?? '未知'}）；请重新生成方案`, plan }
+  // 时间线按 id 比较（名称相同的两条时间线不能串用令牌），没有 id 时才回退到名称
+  const timelineSame = plan.scope?.timelineId && nowScope.timelineId
+    ? plan.scope.timelineId === nowScope.timelineId
+    : plan.scope?.timeline && nowScope.timeline && plan.scope.timeline === nowScope.timeline
+  if (!timelineSame) {
+    return { ok: false, error: `确认令牌与当前时间线不匹配（方案：${plan.scope?.timeline ?? '未知'}#${plan.scope?.timelineId ?? '-'}，当前：${nowScope.timeline ?? '未知'}#${nowScope.timelineId ?? '-'}）；请重新生成方案`, plan }
   }
   const preflight = await opPreflightCheck(ctx, {}, signal)
   if (!preflight.ok) {
     return { ok: false, blocked: true, preflight, plan, error: `确认时预检未通过：${(preflight.blockedReasons ?? []).join('；')}` }
   }
+  await fs.mkdir(plan.targetDir, { recursive: true }).catch(() => null)
 
-  await fs.mkdir(plan.targetDir, { recursive: true }).catch((error) => debugPush({ stage: '交付', message: `创建输出目录失败：${messageOf(error)}` }))
-  // 规格落地：分辨率/帧率写入项目设置；任一失败就中止（不再带着不符的规格去建任务）
-  const writes = []
-  for (const [name, value] of [['timelineResolutionWidth', String(plan.width)], ['timelineResolutionHeight', String(plan.height)], ['timelineFrameRate', String(plan.fps)]]) {
-    const r = await settle(callTool(ctx, 'project_settings', { action: 'set_setting', name, value }, signal))
-    const read = await settle(callTool(ctx, 'project_settings', { action: 'get_setting', name }, signal))
-    const actual = read.ok ? read.value?.settings ?? null : null
-    writes.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && String(actual ?? '').trim() === value) })
+  const requested = { width: plan.width, height: plan.height, fps: plan.fps, format: plan.format, codec: plan.codec, bitrateMbps: plan.bitrateMbps }
+  const settings = { ExportVideo: true, ExportAudio: true, ...(plan.bitrateMbps ? { VideoQuality: plan.bitrateMbps } : {}) }
+
+  const prepareJob = async () => {
+    const prepared = await settle(callTool(ctx, 'render', {
+      action: 'prepare_render_job',
+      target_dir: plan.targetDir,
+      format: plan.format,
+      codec: plan.codec,
+      custom_name: `交付_${plan.width}x${plan.height}_${plan.fps}fps_${plan.bitrateMbps}Mbps`,
+      settings,
+      require_temp_target: false,
+    }, signal))
+    return { prepared, jobId: prepared.ok ? (prepared.value?.job_id ?? null) : null }
   }
-  const failedWrites = writes.filter((item) => !item.ok)
-  if (failedWrites.length) {
-    return { ok: false, plan, writes, error: `项目设置未能按方案落地（${failedWrites.map((item) => `${item.name}: ${item.actual ?? '写入失败'}`).join('；')}），已中止，未创建渲染任务` }
+  const readJob = async (jobId) => {
+    const listed = await settle(callTool(ctx, 'render', { action: 'list_jobs' }, signal))
+    const jobs = listed.ok ? (listed.value?.jobs ?? []) : []
+    return jobs.find((job) => job.JobId === jobId) ?? null
+  }
+  const jobSpecOf = (job) => job ? ({
+    format: job.VideoFormat ?? null,
+    codec: job.VideoCodec ?? null,
+    width: Number(job.FormatWidth) || null,
+    height: Number(job.FormatHeight) || null,
+    fps: job.FrameRate != null ? String(job.FrameRate) : null,
+  }) : null
+  const specMatches = (spec) => Boolean(spec)
+    && Number(spec.width) === plan.width
+    && Number(spec.height) === plan.height
+    && String(spec.fps) === String(plan.fps)
+    && String(spec.format ?? '').toLowerCase() === plan.format.toLowerCase()
+  const deleteJob = async (jobId) => { if (jobId) await settle(callTool(ctx, 'render', { action: 'delete_job', job_id: jobId }, signal)) }
+
+  // ① 先按渲染任务建一次，看任务读回是否已符合方案（能不动项目就不动项目）
+  let { prepared, jobId } = await prepareJob()
+  if (!prepared.ok) return { ok: false, plan, requested, error: `创建渲染任务失败：${messageOf(prepared.error)}` }
+  if (!jobId) return { ok: false, plan, requested, error: '创建渲染任务没有返回 job_id，已中止（未调用启动）' }
+  let job = await readJob(jobId)
+  let spec = jobSpecOf(job)
+  let writes = []
+  let projectChanged = false
+  const oldValues = {}
+  const readSetting = async (name) => {
+    const r = await settle(callTool(ctx, 'project_settings', { action: 'get_setting', name }, signal))
+    return r.ok ? r.value?.settings ?? null : null
+  }
+  const restoreProject = async () => {
+    if (!projectChanged) return { restored: false }
+    const restored = []
+    for (const [name, value] of Object.entries(oldValues)) {
+      if (value == null) continue
+      const r = await settle(callTool(ctx, 'project_settings', { action: 'set_setting', name, value }, signal))
+      restored.push({ name, value, ok: Boolean(r.ok && r.value?.success !== false) })
+    }
+    projectChanged = false
+    return { restored: true, details: restored }
   }
 
-  const settings = {
-    ExportVideo: true,
-    ExportAudio: true,
-    ...(plan.bitrateMbps ? { VideoQuality: plan.bitrateMbps } : {}),
+  // ② 任务规格不符 → 保存旧项目值、改项目、重新建任务再核对；任何一步失败都恢复旧值且不启动
+  if (!specMatches(spec)) {
+    for (const name of ['timelineResolutionWidth', 'timelineResolutionHeight', 'timelineFrameRate']) oldValues[name] = await readSetting(name)
+    await deleteJob(jobId)
+    const applied = []
+    for (const [name, value] of [['timelineResolutionWidth', String(plan.width)], ['timelineResolutionHeight', String(plan.height)], ['timelineFrameRate', String(plan.fps)]]) {
+      projectChanged = true
+      const r = await settle(callTool(ctx, 'project_settings', { action: 'set_setting', name, value }, signal))
+      const actual = await readSetting(name)
+      applied.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && String(actual ?? '').trim() === value) })
+      if (!applied[applied.length - 1].ok) {
+        const restore = await restoreProject()
+        return { ok: false, plan, requested, writes: applied, spec, restore, error: `项目设置未能按方案落地（${name}: ${actual ?? '写入失败'}），已恢复原项目设置并中止，未创建/启动渲染任务` }
+      }
+    }
+    writes = applied
+    const second = await prepareJob()
+    if (!second.prepared.ok) {
+      const restore = await restoreProject()
+      return { ok: false, plan, requested, writes, spec, restore, error: `改用项目设置后重建渲染任务失败：${messageOf(second.prepared.error)}` }
+    }
+    if (!second.jobId) {
+      const restore = await restoreProject()
+      return { ok: false, plan, requested, writes, error: '重建渲染任务没有返回 job_id，已恢复原项目设置并中止' }
+    }
+    jobId = second.jobId
+    job = await readJob(jobId)
+    spec = jobSpecOf(job)
   }
-  const prepared = await settle(callTool(ctx, 'render', {
-    action: 'prepare_render_job',
-    target_dir: plan.targetDir,
-    format: plan.format,
-    codec: plan.codec,
-    custom_name: `交付_${plan.width}x${plan.height}_${plan.fps}fps_${plan.bitrateMbps}Mbps`,
-    settings,
-    require_temp_target: false,
-  }, signal))
-  if (!prepared.ok) return { ok: false, plan, writes, error: messageOf(prepared.error) }
-  const jobId = prepared.value?.job_id
-  const readback = prepared.value?.before?.jobs?.find((job) => job.JobId === jobId) ?? null
-  const spec = {
-    requested: { width: plan.width, height: plan.height, fps: plan.fps, format: plan.format, codec: plan.codec, bitrateMbps: plan.bitrateMbps },
-    job: readback ? { format: readback.VideoFormat, codec: readback.VideoCodec, width: readback.FormatWidth, height: readback.FormatHeight, fps: readback.FrameRate } : null,
+
+  const specMismatch = !specMatches(spec)
+  if (specMismatch) {
+    await deleteJob(jobId)
+    const restore = await restoreProject()
+    return { ok: false, plan, requested, writes, spec, specMismatch: true, restore, error: `渲染任务规格与方案不一致（任务：${JSON.stringify(spec)}），已删除任务、恢复项目设置、未启动渲染` }
   }
-  const started = await settle(callTool(ctx, 'render', { action: 'start', job_ids: jobId ? [jobId] : [] }, signal))
-  const jobOk = Boolean(started.ok && started.value?.success !== false)
-  debugPush({ stage: '交付', message: `已按方案创建并启动渲染任务：${jobId ?? '无 job' }（${plan.format} ${plan.codec} ${plan.width}x${plan.height} ${plan.fps}fps ${plan.bitrateMbps}Mbps）` })
+
+  // ③ 只有「拿到 job_id + 规格核对通过」才允许启动
+  const started = await settle(callTool(ctx, 'render', { action: 'start', job_ids: [jobId] }, signal))
+  const startedOk = Boolean(started.ok && started.value?.success !== false)
+  if (!startedOk) {
+    await deleteJob(jobId)
+    const restore = await restoreProject()
+    return { ok: false, plan, requested, writes, spec, jobId, restore, error: `渲染任务启动失败：${messageOf(started.error)}；已删除任务并恢复项目设置` }
+  }
+  debugPush({ stage: '交付', message: `已按方案创建、核对并启动渲染任务：${jobId}（${plan.format} ${plan.codec} ${plan.width}x${plan.height} ${plan.fps}fps ${plan.bitrateMbps}Mbps）` })
   return {
-    ok: jobOk,
+    ok: true,
     plan,
+    requested,
     writes,
     jobId,
     spec,
-    specMismatch: readback ? (Number(readback.FormatWidth) !== plan.width || Number(readback.FormatHeight) !== plan.height || String(readback.FrameRate) !== String(plan.fps)) : null,
+    specMismatch: false,
     started: started.value ?? null,
-    error: jobOk ? null : `渲染任务创建/启动失败：${messageOf(started.error)}`,
-    note: '令牌已一次性消费；规格已写入项目设置并校验，任务创建参数与方案一致',
+    note: projectChanged ? '规格通过项目设置落地；任务读回与方案一致后才启动' : '任务读回与方案一致，未改动项目设置',
   }
 }
 
