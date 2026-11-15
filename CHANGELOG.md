@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.11.2（验证 npm 可信发布）
+
+- 验证 GitHub Actions → npm Trusted Publisher（OIDC）发布链路
+- publish workflow：恢复 release 触发，保留「版本已存在则跳过」守卫
+- 无功能变更，仅发布链路验证
+
 ## 0.11.1（未发布 / 待 npm publish）
 
 - 新增 `feedback.issue`：一键生成带环境与调试日志的预填 GitHub Issue，并保存本地草稿

@@ -4,8 +4,8 @@ name: publish
 # 再把 release 触发打开，见下方注释。
 on:
   workflow_dispatch:
-  # release:
-  #   types: [published]
+  release:
+    types: [published]
 
 permissions:
   contents: read
