@@ -1,0 +1,58 @@
+{
+  "format": 1,
+  "title": {
+    "zh": "社区插件索引（JiangXingchen4210）",
+    "en": "Community Plugin Index (JiangXingchen4210)"
+  },
+  "metadata": {
+    "categories": {},
+    "labels": {
+      "demo": {
+        "title": {
+          "zh": "DEMO",
+          "en": "DEMO"
+        }
+      }
+    },
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "davinci-console-demo",
+      "description": {
+        "zh": "DaVinci Resolve 调色控制台（DEMO）：灰片还原/官方 LUT 匹配、三层 15 节点调色、10 个风格、黑白柔、遮罩跟踪、交付审批、中文调试日志。需要 macOS + Resolve Studio + Resolve MCP + ffmpeg。",
+        "en": "DaVinci Resolve color console (DEMO): LOG restore with official LUT matching, 3-layer 15-node grade, 10 styles, diffusion, mask/tracking, delivery approval, Chinese debug log. Requires macOS + Resolve Studio + Resolve MCP + ffmpeg."
+      },
+      "homepage": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo"
+      },
+      "icon": "https://raw.githubusercontent.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/main/icon.svg",
+      "metadata": {
+        "keywords": [
+          "davinci",
+          "resolve",
+          "color-grading",
+          "lut",
+          "demo"
+        ],
+        "labels": [
+          "demo"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.11.0",
+          "publishTimestamp": 1763193600,
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          },
+          "source": {
+            "type": "npm"
+          }
+        }
+      ]
+    }
+  ]
+}
