@@ -4378,6 +4378,30 @@ async function withPreviewLock(fn) {
   }
 }
 
+/** 预览能力：区分「能安全分层预览」与「只能看 current/source」。 */
+async function opPreviewCapabilities(ctx, args, signal) {
+  const { item } = await resolveItemContext(ctx, signal, args.itemId)
+  const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
+  const nodes = probe.ok ? (probe.value?.nodes ?? []) : []
+  const numNodes = Number(probe.ok ? probe.value?.num_nodes : 0) || nodes.length
+  const hasEnabled = nodes.some((node) => typeof node.enabled === 'boolean' || typeof node.is_enabled === 'boolean')
+  const complete = nodes.length > 0 && nodes.length === numNodes
+  const reasons = []
+  if (!probe.ok) reasons.push(`读取节点图失败：${messageOf(probe.error)}`)
+  if (probe.ok && !hasEnabled) reasons.push('MCP probe_node_graph 不返回节点开关（enabled/is_enabled），无法保证预览后原状态可还原')
+  if (probe.ok && !complete) reasons.push(`节点列表不完整（返回 ${nodes.length}/${numNodes}，无工具的节点被省略），无法按层完整切换`)
+  return {
+    ok: true,
+    itemId: item.id,
+    layeredPreview: probe.ok && hasEnabled && complete,
+    currentPreview: true,
+    sourcePreview: true,
+    nodes: { reported: nodes.length, total: numNodes, hasEnabled, complete },
+    reasons,
+    note: reasons.length ? '分层预览已禁用（安全原因）；可用：现行 / 原素材 / 分屏（仅限这两层）' : '分层预览可用',
+  }
+}
+
 async function opPreviewLive(ctx, args, signal) {
   const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
   const stage = ['current', 'source', 'L1', 'L2', 'L3'].includes(args.stage) ? args.stage : 'current'
@@ -4401,13 +4425,26 @@ async function opPreviewLive(ctx, args, signal) {
       return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length, timecode }
     }
     if (stage === 'source') {
-      const source = await exportSourceFrame(ctx, signal, item.id)
-      if (!source?.path) throw new Error('抓不到原素材帧')
       const dir = await ensureDataDir('previews')
       const outPath = path.join(dir, `live-src-${stamp()}-${++previewSequence}.jpg`)
+      // 快速路径：直接对源文件做精确定位抽 1 帧（MCP extract_frames 在 4K 素材上会卡几分钟）
+      const sourceFrame = Number(info.sourceStartFrame)
+      if (info.filePath && Number.isFinite(sourceFrame)) {
+        const projectFpsValue = await projectFps(ctx, signal)
+        const seconds = Math.max(0, sourceFrame) / (Number(projectFpsValue) || 24)
+        try {
+          await run('ffmpeg', ['-ss', seconds.toFixed(3), '-i', info.filePath, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 30_000 })
+          const bytes = await fs.readFile(outPath)
+          return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode, method: 'ffmpeg-fast-seek' }
+        } catch (error) {
+          debugPush({ stage: '预览', message: `源素材快速抽帧失败，回退 MCP：${messageOf(error)}` })
+        }
+      }
+      const source = await exportSourceFrame(ctx, signal, item.id)
+      if (!source?.path) throw new Error('抓不到原素材帧')
       await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
       const bytes = await fs.readFile(outPath)
-      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode }
+      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode, method: 'mcp-extract' }
     }
 
     const { planStageEnabled } = await importFresh('lib/preview_state.mjs')
@@ -5479,6 +5516,7 @@ const OPS = {
   'media.import': opMediaImport,
   'preview.render': opPreviewRender,
   'preview.live': opPreviewLive,
+  'preview.capabilities': opPreviewCapabilities,
   'preview.compare': opPreviewCompare,
   'lut.library': opLutLibrary,
   'lut.installBundle': opLutInstallBundle,

@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.11.13 — 分层预览能力探测 / source 提速（本地版）
+
+- **实测确认**：本机 MCP `probe_node_graph` 不返回 `enabled`，且只返回有工具的节点（15 个节点只读到 3 个）⇒ 没有可靠的分层预览前提
+- 新增 `preview.capabilities`：报告 `layeredPreview` 是否可用、节点数/开关可读性/不完整原因
+- **面板按能力禁用 L1–L3**并显示原因；`current` / `source` / 分屏（这两层）保留
+- **source 预览提速**：改为对源文件 ffmpeg 精确定位抽 1 帧（30s 超时），失败才回退 MCP `extract_frames`（4K 素材上后者曾 >300s）
+
 ## 0.11.12 — 实时预览接线 + 风格必需效果验收（本地版）
 
 - **实时预览真正接进 UI**：调色页新增「实时预览 / 分屏对比」卡片（现行/原素材/L1/L2/L3 + 左右分屏选择），调用 `preview.live` / `preview.compare`；客户端测试断言 op 已被调用，不再是 host 有实现、UI 无入口

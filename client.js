@@ -1077,6 +1077,12 @@ window.__ModuleLoader__.load({
       const [liveLeft, setLiveLeft] = React.useState('source')
       const [liveRight, setLiveRight] = React.useState('current')
       const [liveFrame, setLiveFrame] = React.useState({ left: null, right: null, stage: null, error: null })
+      const [liveCaps, setLiveCaps] = React.useState(null)
+      React.useEffect(() => {
+        let alive = true
+        request('preview.capabilities', {}).then((value) => { if (alive) setLiveCaps(value?.value ?? value ?? null) }).catch(() => {})
+        return () => { alive = false }
+      }, [])
       const [lutName, setLutName] = React.useState('godfather-look-s05')
       const [lutResult, setLutResult] = React.useState(null)
       const [lutFile, setLutFile] = React.useState(null)
@@ -2638,7 +2644,7 @@ window.__ModuleLoader__.load({
           'div',
           { style: S.buttons },
           [['current', '现行'], ['source', '原素材'], ['L1', 'L1'], ['L2', 'L2'], ['L3', 'L3']].map(([key, label]) =>
-            h(Button, { key, onClick: () => runLive(key), disabled: working }, label),
+            h(Button, { key, onClick: () => runLive(key), disabled: working || (['L1', 'L2', 'L3'].includes(key) && liveCaps && liveCaps.layeredPreview === false) }, label),
           ),
         ),
         h(
@@ -2648,6 +2654,9 @@ window.__ModuleLoader__.load({
           h('select', { value: liveRight, onChange: (event) => setLiveRight(event.target.value) }, ['source', 'L1', 'L2', 'L3', 'current'].map((option) => h('option', { key: option, value: option }, option))),
           h(Button, { onClick: runLiveCompare, disabled: working }, '分屏对比'),
         ),
+        liveCaps && liveCaps.layeredPreview === false
+          ? h('div', { style: S.hint }, `分层预览已禁用：${(liveCaps.reasons ?? []).join('；')}。可用：现行 / 原素材 / 分屏。`)
+          : null,
         liveFrame.error ? h('div', { style: S.error }, liveFrame.error) : null,
         liveFrame.dataUrl ? h('img', { src: liveFrame.dataUrl, style: { maxWidth: '100%', borderRadius: 6, marginTop: 8 } }) : null,
         liveFrame.left || liveFrame.right
