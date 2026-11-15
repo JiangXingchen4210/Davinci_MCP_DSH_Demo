@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.11.16 — source 预览改走 Resolve 侧抽帧（本地版）
+
+- 移除宿主 ffmpeg 直读原始素材的路径（实测宿主机调起后读任何视频文件都不返回；/tmp 小文件同样如此，排除 TCC 目录问题）
+- source 预览改为 MCP `extract_frames` 在 Resolve 侧抽帧，再由宿主 ffmpeg 缩放
+- 实测 MCP 抽帧本身 <1s，但经插件链路仍触发 25s 超时 → 下一步在 exportSourceFrame 内部逐步打点（captureSourceFrame / extract_frames / 缩放）
+- 保留 25s / 45s 超时兜底
+
 ## 0.11.15 — source 预览诊断（本地版）
 
 - 定位：宿主进程里 ffmpeg 路径正确（`/opt/homebrew/bin/ffmpeg`），但读取桌面 4K 源文件时调起后不返回；同一命令在终端 1s 完成

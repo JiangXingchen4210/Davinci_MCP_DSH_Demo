@@ -4446,24 +4446,7 @@ async function opPreviewLive(ctx, args, signal) {
     if (stage === 'source') {
       const dir = await ensureDataDir('previews')
       const outPath = path.join(dir, `live-src-${stamp()}-${++previewSequence}.jpg`)
-      // 快速路径：直接对源文件做精确定位抽 1 帧（MCP extract_frames 在 4K 素材上会卡几分钟）
-      const sourceFrame = Number(info.sourceStartFrame)
-      debugPush({ stage: '预览', message: `source 分支：fastPath=${Boolean(info.filePath && Number.isFinite(sourceFrame))} srcFrame=${info.sourceStartFrame}` })
-      if (info.filePath && Number.isFinite(sourceFrame)) {
-        const projectFpsValue = await projectFps(ctx, signal)
-        const ffmpegPath = await whichTool('ffmpeg')
-        debugPush({ stage: '预览', message: `source 分支：fps=${projectFpsValue} ffmpeg=${ffmpegPath ?? '(未找到)'}` })
-        const seconds = Math.max(0, sourceFrame) / (Number(projectFpsValue) || 24)
-        try {
-          if (!ffmpegPath) throw new Error('宿主进程 PATH 里没有 ffmpeg')
-          await run(ffmpegPath, ['-ss', seconds.toFixed(3), '-i', info.filePath, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 20_000 })
-          const bytes = await fs.readFile(outPath)
-          debugPush({ stage: '预览', message: `source 分支：ffmpeg 完成 ${outPath}` })
-          return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode, method: 'ffmpeg-fast-seek' }
-        } catch (error) {
-          debugPush({ stage: '预览', message: `源素材快速抽帧失败，回退 MCP：${messageOf(error)}` })
-        }
-      }
+      // Resolve 侧抽帧：宿主机 ffmpeg 直读素材会卡住；实测 MCP extract_frames <1s
       const source = await exportSourceFrame(ctx, signal, item.id)
       if (!source?.path) throw new Error('抓不到原素材帧')
       await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
