@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.11.20 — 本地 link 安装的 icon 元信息修复
+
+- 根因：`package.json` 通过 `exports["./icon"]` 暴露图标；本地以 `@local/davinci-console` 软链安装时，DSH 用真实路径校验图标归属包名，包名（davinci-console-demo）与 link 名不一致 → `icon must remain inside its package directory`
+- 修复：移除 `exports["./icon"]`，改用顶层 `"icon": "icon.svg"`（DSH 走 manifest 相对路径校验，本地 link 与 npm 安装都成立）
+- 无功能变更
+
 ## 0.11.19 — 剧情坐标 / 肤色选区 / 风格完成度 / Vision 测试降级（正式版）
 
 - **剧情切点坐标统一**：运动采样不再加源偏移，保持镜头内相对秒（与 `placeUnit` 一致）；同一表演在源文件平移 40s，相对切点/理由/质量不变（新增 `story_offset.test.mjs`）
