@@ -76,6 +76,13 @@ function run(command, args, options = {}) {
   })
 }
 
+/** 解析可执行文件绝对路径（宿主进程 PATH 可能与 shell 不同）。 */
+function whichTool(bin) {
+  return new Promise((resolve) => {
+    execFile('/usr/bin/env', ['which', bin], { timeout: 5000 }, (error, stdout) => resolve(error ? null : (String(stdout).trim() || null)))
+  })
+}
+
 async function ensureDataDir(sub) {
   const dir = sub ? path.join(DATA_DIR, sub) : DATA_DIR
   await fs.mkdir(dir, { recursive: true })
@@ -4444,10 +4451,12 @@ async function opPreviewLive(ctx, args, signal) {
       debugPush({ stage: '预览', message: `source 分支：fastPath=${Boolean(info.filePath && Number.isFinite(sourceFrame))} srcFrame=${info.sourceStartFrame}` })
       if (info.filePath && Number.isFinite(sourceFrame)) {
         const projectFpsValue = await projectFps(ctx, signal)
-        debugPush({ stage: '预览', message: `source 分支：fps=${projectFpsValue} 准备 ffmpeg 抽帧` })
+        const ffmpegPath = await whichTool('ffmpeg')
+        debugPush({ stage: '预览', message: `source 分支：fps=${projectFpsValue} ffmpeg=${ffmpegPath ?? '(未找到)'}` })
         const seconds = Math.max(0, sourceFrame) / (Number(projectFpsValue) || 24)
         try {
-          await run('ffmpeg', ['-ss', seconds.toFixed(3), '-i', info.filePath, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 30_000 })
+          if (!ffmpegPath) throw new Error('宿主进程 PATH 里没有 ffmpeg')
+          await run(ffmpegPath, ['-ss', seconds.toFixed(3), '-i', info.filePath, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 20_000 })
           const bytes = await fs.readFile(outPath)
           debugPush({ stage: '预览', message: `source 分支：ffmpeg 完成 ${outPath}` })
           return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode, method: 'ffmpeg-fast-seek' }

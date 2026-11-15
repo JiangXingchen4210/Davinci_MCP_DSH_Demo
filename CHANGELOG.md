@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.11.15 — source 预览诊断（本地版）
+
+- 定位：宿主进程里 ffmpeg 路径正确（`/opt/homebrew/bin/ffmpeg`），但读取桌面 4K 源文件时调起后不返回；同一命令在终端 1s 完成
+- 高度怀疑 macOS 隐私（TCC）对 DSH/子进程的「桌面/文件与文件夹」访问限制：`current` 预览只用 Resolve 导出的帧（可读），`source` 需要直读原始素材
+- 仍保留 25s 超时兜底（不会卡死）
+- 下一步：把素材拷到非受保护目录（如 `~/Movies` 或 `/tmp`）验证，或给 DSH 授予完全磁盘访问权限
+
 ## 0.11.14 — 预览超时兜底（本地版）
 
 - `preview.live` 加 25s 超时、`preview.compare` 45s：超时返回可解释错误，不再让面板无限转圈
