@@ -1307,26 +1307,39 @@ async function opScenesScan(ctx, args, signal) {
       clips[clips.length - 1].scanError = messageOf(error)
       continue
     }
+    const { intersectShotWithSource } = await importFresh('lib/source_range.mjs')
     const sourceStart = Number.isFinite(info.sourceStartFrame) ? info.sourceStartFrame : 0
+    const sourceEnd = Number.isFinite(info.sourceEndFrame) ? info.sourceEndFrame : sourceStart + Math.max(1, Math.round((Number(info.durationFrames) || 0)))
     for (const shot of scan.shots ?? []) {
-      // 媒体秒 → 片段内偏移 → 记录帧
-      const inOffsetFrames = Math.round(shot.start * fps) - sourceStart
-      const outOffsetFrames = Math.round(shot.end * fps) - sourceStart
-      const recordStart = info.recordStart + Math.max(0, inOffsetFrames)
-      const recordEnd = Math.min(info.recordEnd, info.recordStart + Math.max(1, outOffsetFrames))
-      if (recordEnd <= recordStart) continue
+      // 交给纯函数做交集：镜头按整段源素材扫描，但只能用时间线片段实际可用的源区间
+      const range = intersectShotWithSource({
+        shotStartSec: shot.start,
+        shotEndSec: shot.end,
+        fps,
+        sourceStartFrame: sourceStart,
+        sourceEndFrame: sourceEnd,
+        recordStart: info.recordStart,
+      })
+      if (!range.ok) continue
       scenes.push({
         index: sceneIndex++,
         itemId: info.itemId,
         clipId: info.clipId,
         clipName: info.name,
         fileName: path.basename(info.filePath),
-        recordStart,
-        recordEnd,
-        durationFrames: recordEnd - recordStart,
-        startSeconds: shot.start,
-        endSeconds: shot.end,
-        frames: shot.frames ?? [],
+        recordStart: range.recordStart,
+        recordEnd: range.recordEnd,
+        durationFrames: range.durationFrames,
+        sourceStartFrame: range.inFrame,
+        sourceEndFrame: range.outFrame,
+        startSeconds: range.inFrame / fps,
+        endSeconds: range.outFrame / fps,
+        clippedHeadFrames: range.clippedHeadFrames,
+        clippedTailFrames: range.clippedTailFrames,
+        frames: (shot.frames ?? []).filter((frame) => {
+          const frameNo = Math.round(Number(frame) * fps)
+          return Number.isFinite(frameNo) ? frameNo >= range.inFrame && frameNo < range.outFrame : true
+        }),
         metrics: shot.metrics ?? null,
       })
     }
@@ -1450,10 +1463,10 @@ async function opEditAuto(ctx, args, signal) {
       clipId: scene.clipId,
       duration: scene.durationFrames / fps,
       metrics: scene.metrics,
-      start: scene.startSeconds,
-      end: scene.endSeconds,
-      sourceStartFrame: Math.round(scene.startSeconds * fps),
-      sourceEndFrame: Math.round(scene.endSeconds * fps),
+      start: scene.sourceStartFrame / fps,
+      end: scene.sourceEndFrame / fps,
+      sourceStartFrame: scene.sourceStartFrame,
+      sourceEndFrame: scene.sourceEndFrame,
       recordStart: scene.recordStart,
     }))
     const scores = editscore.scoreShots(shots, { preferSharp: args.preferSharp !== false })
@@ -1509,21 +1522,29 @@ async function opEditAuto(ctx, args, signal) {
   const fps = scan.fps ?? 24
   // 顺序放置：record_frame 必须累计（逐段相接），不能都用 index（会全部叠在开头）
   let cursor = 0
+  const { clampEditToSource } = await importFresh('lib/source_range.mjs')
   const clipInfos = decision.edits
     .map((edit) => {
       const shot = scan.scenes.find((entry) => entry.index === edit.shotIndex)
       if (!shot?.clipId) return null
-      const startFrame = Math.round(Number(edit.in ?? shot.startSeconds) * fps)
-      const outFrame = Math.round(Number(edit.out ?? shot.endSeconds) * fps)
-      const durationFrames = Math.max(1, outFrame - startFrame)
+      const clamped = clampEditToSource({
+        inSec: edit.in,
+        outSec: edit.out,
+        fallbackInSec: shot.sourceStartFrame / fps,
+        fallbackOutSec: shot.sourceEndFrame / fps,
+        sourceStartFrame: shot.sourceStartFrame,
+        sourceEndFrame: shot.sourceEndFrame,
+        fps,
+      })
+      if (!clamped.ok) return null
       const info = {
         clip_id: shot.clipId,
-        start_frame: startFrame,
-        end_frame: Math.max(startFrame + 1, outFrame),
+        start_frame: clamped.inFrame,
+        end_frame: clamped.outFrame,
         record_frame: cursor,
         track_index: 1,
       }
-      cursor += durationFrames
+      cursor += clamped.durationFrames
       return info
     })
     .filter(Boolean)
@@ -4547,20 +4568,36 @@ async function listLutLibrary() {
 
 /** 还原决策：灰片？→ 机型/曲线 → 库里 LUT 是否匹配 → 缺就如实告知 + 官方地址 */
 async function opRestoreResolve(ctx, args, signal) {
-  const { judgeFlat, detectCurveFromMeta, matchCurveLut } = await importFresh('lib/restore.mjs')
+  const { judgeFlat, detectCurveFromMeta, matchCurveLut, rcmManaged } = await importFresh('lib/restore.mjs')
   const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
-  // 1) 灰片判定：源素材帧统计
-  const frame = await exportSourceFrame(ctx, signal, item.id).catch(() => null)
-  const stats = frame?.path ? (await layersCli(['analyze', frame.path]).catch(() => null)) : null
-  const flat = judgeFlat(stats)
-  debugPush({ stage: '还原', message: `灰片判定：${flat.reason}${stats ? '' : '（没有取到画面统计）'}` })
-  if (flat.flat === false) return { ok: true, needsRestore: false, verdict: flat, camera: null, curve: null, lut: null }
-  // 2) 机型/曲线：元数据优先（ffprobe + 剪辑属性）
+
+  // 1) 明确的曲线/元数据优先：LogC4 与 LogC3 是两条曲线，不能因为同品牌就互相顶替
   const meta = await settle(callTool(ctx, 'media_pool_item', { action: 'get_metadata', clip_id: info.mediaPoolItemId ?? item.id }, signal)).catch(() => null)
   const probe = await ffprobeJson(info.filePath).catch(() => null)
   const metaText = [JSON.stringify(probe?.format?.tags ?? {}), JSON.stringify(probe?.streams?.[0]?.tags ?? {}), JSON.stringify(meta?.value ?? {}), info.name].join(' ')
   const curve = detectCurveFromMeta(metaText)
-  debugPush({ stage: '还原', message: curve ? `机型/曲线：${curve.vendor} ${curve.model} → ${curve.curve}（来自元数据）` : '元数据里没有识别出机型/曲线，无法匹配官方 LUT' })
+  debugPush({ stage: '还原', message: curve ? `机型/曲线：${curve.vendor} ${curve.model} → ${curve.curve}（来自元数据/显式曲线，matchedBy=${curve.matchedBy}）` : '元数据里没有识别出机型/曲线，无法匹配官方 LUT' })
+
+  // 2) 项目色彩管理已接管输入变换 → 不再挂第二次技术 LUT
+  const settingsRaw = await settle(callTool(ctx, 'project_settings', { action: 'get_setting' }, signal)).catch(() => null)
+  const settings = settingsRaw?.ok ? (settingsRaw.value?.settings ?? settingsRaw.value ?? {}) : {}
+  const rcm = rcmManaged(settings)
+  if (curve && rcm.managed) {
+    debugPush({ stage: '还原', message: `跳过技术 LUT：${rcm.reason}` })
+    return { ok: true, needsRestore: false, skippedByManagement: true, project: { colorScienceMode: settings.colorScienceMode ?? null, input: settings.colorSpaceInput ?? null }, verdict: { flat: null, reason: rcm.reason }, camera: { vendor: curve.vendor, model: curve.model }, curve: curve.curve, lut: null, message: `项目已由色彩管理接管输入变换（${rcm.reason}），不再挂第二次技术 LUT` }
+  }
+
+  // 3) 画面统计只用于提示冲突：低反差不一定等于 LOG（雾景/夜景），元数据明确时以元数据为准
+  const frame = await exportSourceFrame(ctx, signal, item.id).catch(() => null)
+  const stats = frame?.path ? (await layersCli(['analyze', frame.path]).catch(() => null)) : null
+  const flat = judgeFlat(stats)
+  const statsConflict = Boolean(curve && flat.flat === false)
+  debugPush({ stage: '还原', message: `灰片判定：${flat.reason}${stats ? '' : '（没有取到画面统计）'}${statsConflict ? '；与元数据冲突，按元数据执行（统计仅提示）' : ''}` })
+  if (!curve) {
+    if (flat.flat === false) return { ok: true, needsRestore: false, verdict: flat, camera: null, curve: null, lut: null, note: '没有识别到 LOG 元数据，画面统计也认为已是彩色：保持原状' }
+    return { ok: false, needsRestore: true, verdict: flat, camera: null, curve: null, lut: null, needsUserInput: true, message: '识别不出机型/曲线：请告知机型或提供官方 LUT' }
+  }
+
   // 3) 库里按曲线匹配（只看曲线名，不给某台机器加分）
   const luts = await listLutLibrary()
   const matched = matchCurveLut(luts, curve)
@@ -4569,9 +4606,6 @@ async function opRestoreResolve(ctx, args, signal) {
   const pool = rec709Only.length ? rec709Only : matched.candidates
   const topScore = pool.length ? pool[0].score : 0
   const tied = pool.filter((item) => item.score === topScore)
-  if (!curve) {
-    return { ok: false, needsRestore: true, verdict: flat, camera: null, curve: null, lut: null, needsUserInput: true, message: '识别不出机型/曲线：请告知机型或提供官方 LUT' }
-  }
   if (!pool.length) {
     debugPush({ stage: '还原', message: `DaVinci LUT 库里没有 ${curve.curve} → ${curve.vendor} 官方 LUT 页：${curve.officialPage}（需要的话可一键下载/上传）` })
     return { ok: false, needsRestore: true, verdict: flat, camera: { vendor: curve.vendor, model: curve.model }, curve: curve.curve, lut: null, needsLut: true, officialPage: curve.officialPage, autoDownloadUrl: curve.officialLutUrl ?? null, message: `DaVinci 自带库里没有 ${curve.curve} 的还原 LUT；官方页面：${curve.officialPage}${curve.officialLutUrl ? '（已找到官方直链包，可一键下载安装）' : ''}` }
@@ -4581,7 +4615,7 @@ async function opRestoreResolve(ctx, args, signal) {
     return { ok: true, needsRestore: true, needsChoice: true, verdict: flat, camera: { vendor: curve.vendor, model: curve.model }, curve: curve.curve, lut: null, candidates: pool.slice(0, 6), officialPage: curve.officialPage, message: 'DaVinci 自带库里有同一曲线的多条 LUT，请选择或上传官方 LUT' }
   }
   debugPush({ stage: '还原', message: `匹配到 ${curve.curve} 还原 LUT：${pool[0].name}` })
-  return { ok: true, needsRestore: true, verdict: flat, camera: { vendor: curve.vendor, model: curve.model }, curve: curve.curve, lut: pool[0], candidates: pool.slice(0, 6), officialPage: curve.officialPage }
+  return { ok: true, needsRestore: true, verdict: flat, statsConflict, camera: { vendor: curve.vendor, model: curve.model }, curve: curve.curve, lut: pool[0], candidates: pool.slice(0, 6), officialPage: curve.officialPage }
 }
 
 /** 一键下载官方 LUT：.cube 直接装；.zip 解压出所有 .cube 装进用户 LUT 目录。 */
