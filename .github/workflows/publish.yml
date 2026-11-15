@@ -1,0 +1,33 @@
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # 方案 A（推荐）：npm 可信发布（Trusted Publisher / OIDC，无需 token）
+      # 需要先在 npm 包页 Settings → Trusted Publisher 里绑定本仓库与 workflow 名
+      - name: Publish (trusted publishing)
+        run: npm publish --provenance --access public
+
+      # 方案 B：改用 NPM_TOKEN（若没配 Trusted Publisher）
+      # 先把 token 存进仓库 Secrets：NPM_TOKEN
+      # - name: Publish (token)
+      #   run: npm publish --provenance --access public
+      #   env:
+      #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
