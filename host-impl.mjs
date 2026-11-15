@@ -4402,8 +4402,17 @@ async function opPreviewCapabilities(ctx, args, signal) {
   }
 }
 
+/** 给交互操作加超时上限：超时返回可解释错误，而不是让面板一直转圈。 */
+function withDeadline(promise, ms, message) {
+  let timer = null
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: false, timeout: true, error: message }), ms) })
+  return Promise.race([promise, deadline]).finally(() => { if (timer) clearTimeout(timer) })
+}
+
 async function opPreviewLive(ctx, args, signal) {
+  debugPush({ stage: '预览', message: `preview.live 开始 stage=${args.stage ?? 'current'} itemId=${args.itemId ?? '(默认)'}` })
   const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
+  debugPush({ stage: '预览', message: `上下文解析完成 item=${item.id} file=${info.filePath ?? 'null'} srcStart=${info.sourceStartFrame}` })
   const stage = ['current', 'source', 'L1', 'L2', 'L3'].includes(args.stage) ? args.stage : 'current'
   const width = Number(args.width) || 640
   if (previewState.renderInProgress && stage !== 'current' && stage !== 'source' && args.allowDuringRender !== true) {
@@ -4411,9 +4420,12 @@ async function opPreviewLive(ctx, args, signal) {
   }
   const layered = stage !== 'current' && stage !== 'source'
   const run = async () => {
+    debugPush({ stage: '预览', message: `等待播放头锁获得，开始定位` })
     const seek = await seekToItem(ctx, signal, item.id)
     if (!seek.ok) throw new Error(`无法定位片段：${seek.error}`)
+    debugPush({ stage: '预览', message: `定位完成 track=${seek.trackIndex} tc=${seek.timecode}` })
     const probe = await readLayeredNodes(ctx, signal, item.id)
+    debugPush({ stage: '预览', message: `节点图读取完成 ok=${probe.ok} nodes=${probe.nodes.length}` })
     // 依赖节点图的阶段：读图失败必须返回原因，不能当“空图”成功
     if (layered && !probe.ok) {
       return { ok: false, stage, itemId: item.id, reason: 'probe_failed', error: probe.error, nodes: null }
@@ -4429,12 +4441,15 @@ async function opPreviewLive(ctx, args, signal) {
       const outPath = path.join(dir, `live-src-${stamp()}-${++previewSequence}.jpg`)
       // 快速路径：直接对源文件做精确定位抽 1 帧（MCP extract_frames 在 4K 素材上会卡几分钟）
       const sourceFrame = Number(info.sourceStartFrame)
+      debugPush({ stage: '预览', message: `source 分支：fastPath=${Boolean(info.filePath && Number.isFinite(sourceFrame))} srcFrame=${info.sourceStartFrame}` })
       if (info.filePath && Number.isFinite(sourceFrame)) {
         const projectFpsValue = await projectFps(ctx, signal)
+        debugPush({ stage: '预览', message: `source 分支：fps=${projectFpsValue} 准备 ffmpeg 抽帧` })
         const seconds = Math.max(0, sourceFrame) / (Number(projectFpsValue) || 24)
         try {
           await run('ffmpeg', ['-ss', seconds.toFixed(3), '-i', info.filePath, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 30_000 })
           const bytes = await fs.readFile(outPath)
+          debugPush({ stage: '预览', message: `source 分支：ffmpeg 完成 ${outPath}` })
           return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode, method: 'ffmpeg-fast-seek' }
         } catch (error) {
           debugPush({ stage: '预览', message: `源素材快速抽帧失败，回退 MCP：${messageOf(error)}` })
@@ -5515,9 +5530,9 @@ const OPS = {
   'export.check': opExportCheck,
   'media.import': opMediaImport,
   'preview.render': opPreviewRender,
-  'preview.live': opPreviewLive,
+  'preview.live': (ctx, args, signal) => withDeadline(opPreviewLive(ctx, args, signal), 25_000, '预览超时（25s）：源素材抽帧或 Resolve 导出过慢，请先设置入出点后重试'),
   'preview.capabilities': opPreviewCapabilities,
-  'preview.compare': opPreviewCompare,
+  'preview.compare': (ctx, args, signal) => withDeadline(opPreviewCompare(ctx, args, signal), 45_000, '分屏预览超时（45s）'),
   'lut.library': opLutLibrary,
   'lut.installBundle': opLutInstallBundle,
   'lut.ensure': opLutEnsure,

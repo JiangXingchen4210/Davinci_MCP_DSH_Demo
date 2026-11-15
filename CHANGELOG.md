@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.11.14 — 预览超时兜底（本地版）
+
+- `preview.live` 加 25s 超时、`preview.compare` 45s：超时返回可解释错误，不再让面板无限转圈
+- 实测：`current` 0.3s 正常；`source` 25s 后返回 `timeout: true` + 提示（源素材抽帧在宿主进程里仍未完成，下一步单独定位）
+- 分层预览继续按 `preview.capabilities` 置灰并说明原因
+
 ## 0.11.13 — 分层预览能力探测 / source 提速（本地版）
 
 - **实测确认**：本机 MCP `probe_node_graph` 不返回 `enabled`，且只返回有工具的节点（15 个节点只读到 3 个）⇒ 没有可靠的分层预览前提
