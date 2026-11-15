@@ -2620,6 +2620,43 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      const runLive = async (stage) => {
+        const value = await run('preview.live', { stage }, `实时预览 ${stage}`)
+        if (value?.ok && value?.dataUrl) setLiveFrame({ stage, dataUrl: value.dataUrl, left: null, right: null, error: null })
+        else setLiveFrame({ stage, dataUrl: null, left: null, right: null, error: value?.error ?? '实时预览失败' })
+      }
+      const runLiveCompare = async () => {
+        const value = await run('preview.compare', { left: liveLeft, right: liveRight }, '分屏对比')
+        if (value?.ok && value?.left?.dataUrl && value?.right?.dataUrl) setLiveFrame({ stage: 'compare', dataUrl: null, left: value.left.dataUrl, right: value.right.dataUrl, error: null })
+        else setLiveFrame({ stage: 'compare', dataUrl: null, left: null, right: null, error: value?.error ?? `分屏失败（${value?.failedSide ?? '未知'}）` })
+      }
+      const livePreviewCard = h(
+        Card,
+        { title: '实时预览 / 分屏对比' },
+        h('div', { style: S.hint }, '按层预览当前片段；预览会临时切换节点开关，结束后按原状态恢复。'),
+        h(
+          'div',
+          { style: S.buttons },
+          [['current', '现行'], ['source', '原素材'], ['L1', 'L1'], ['L2', 'L2'], ['L3', 'L3']].map(([key, label]) =>
+            h(Button, { key, onClick: () => runLive(key), disabled: working }, label),
+          ),
+        ),
+        h(
+          'div',
+          { style: S.buttons },
+          h('select', { value: liveLeft, onChange: (event) => setLiveLeft(event.target.value) }, ['source', 'L1', 'L2', 'L3', 'current'].map((option) => h('option', { key: option, value: option }, option))),
+          h('select', { value: liveRight, onChange: (event) => setLiveRight(event.target.value) }, ['source', 'L1', 'L2', 'L3', 'current'].map((option) => h('option', { key: option, value: option }, option))),
+          h(Button, { onClick: runLiveCompare, disabled: working }, '分屏对比'),
+        ),
+        liveFrame.error ? h('div', { style: S.error }, liveFrame.error) : null,
+        liveFrame.dataUrl ? h('img', { src: liveFrame.dataUrl, style: { maxWidth: '100%', borderRadius: 6, marginTop: 8 } }) : null,
+        liveFrame.left || liveFrame.right
+          ? h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+              liveFrame.left ? h('img', { src: liveFrame.left, style: { width: '50%', borderRadius: 6 } }) : null,
+              liveFrame.right ? h('img', { src: liveFrame.right, style: { width: '50%', borderRadius: 6 } }) : null)
+          : null,
+      )
+
       const styleCard = h(
         Card,
         { title: t('style.title') },
@@ -3292,7 +3329,7 @@ window.__ModuleLoader__.load({
           preflightCard,
           tabs,
           tab === 'grade'
-            ? h(React.Fragment, null, currentCard, gradeCard, versionsCard, copyCard, lutCard, dangerCard)
+            ? h(React.Fragment, null, currentCard, livePreviewCard, gradeCard, versionsCard, copyCard, lutCard, dangerCard)
             : tab === 'effects'
               ? h(React.Fragment, null, transformCard, cropCard, opacityCard, blurCard)
               : tab === 'look'

@@ -3842,6 +3842,7 @@ async function opStyleOneClick(ctx, args, signal) {
     if (!preflight.ok) return { ok: false, blocked: true, preflight, error: `预检未通过：${preflight.missingMedia.length} 条素材离线，先重链` }
   }
   const { findStyle } = await importFresh('lib/stylelib.mjs')
+  const { planStyleEffects, summarizeStyleEffects } = await importFresh('lib/style_effects.mjs')
   const style = findStyle(String(args.preset ?? ''))
   if (!style) throw new Error('未知风格；先调 style.catalog 看列表')
   const structure = await settle(callTool(ctx, 'timeline', { action: 'probe_timeline_structure', track_types: ['video'] }, signal))
@@ -3866,7 +3867,8 @@ async function opStyleOneClick(ctx, args, signal) {
       }
     } catch (error) { restore = { ok: false, error: messageOf(error) } }
     // ② 风格：三层 15 节点，按配方改参数（不是套 LUT）
-    const built = await opGradeBuild3(ctx, { itemId, lookPreset: style.key, lookStrength: 0, styleStrength: 0.95, recipe: style.recipe, skipStyleLut: true }, signal).catch((error) => ({ ok: false, error: messageOf(error) }))
+    const texturePlan = Number(style.grain) > 0 ? { grain: { amount: Number(style.grain), method: 'fusion-or-post' } } : null
+    const built = await opGradeBuild3(ctx, { itemId, lookPreset: style.key, lookStrength: 0, styleStrength: 0.95, recipe: style.recipe, skipStyleLut: true, texture: texturePlan }, signal).catch((error) => ({ ok: false, error: messageOf(error) }))
     // build3 重建会清掉节点上的 LUT：用**同一份** lutPath 在 build 之后补挂，失败就标失败（不再假装成功）
     if (restore?.lutPath) {
       try {
@@ -3886,15 +3888,24 @@ async function opStyleOneClick(ctx, args, signal) {
     }
     // ④ 可选：柔光（只有风格需要才加）
     const mist = style.mist ? await opTextureMist(ctx, { itemId, mode: style.mist.mode, strength: style.mist.strength }, signal).catch(() => ({ ok: false })) : null
-    results.push({ itemId, restore: Boolean(restore?.ok), restoreLut: restore?.lutPath ? path.basename(String(restore.lutPath)) : null, restoreError: restore?.error ?? null, grade: Boolean(built?.ok), nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: Boolean(filmLut?.ok), mist: mist ? Boolean(mist.ok) : null })
+    const effects = summarizeStyleEffects(style, {
+      grade: Boolean(built?.ok),
+      filmLut: style.filmLut ? Boolean(filmLut?.ok) : undefined,
+      mist: style.mist ? Boolean(mist?.ok) : undefined,
+    })
+    results.push({ itemId, restore: Boolean(restore?.ok), restoreLut: restore?.lutPath ? path.basename(String(restore.lutPath)) : null, restoreError: restore?.error ?? null, grade: Boolean(built?.ok), nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: style.filmLut ? Boolean(filmLut?.ok) : null, mist: mist ? Boolean(mist.ok) : null, effects })
   }
   debugPush({ stage: '风格', message: `风格「${style.label}」完成：${results.filter((item) => item.grade).length}/${results.length} 条（还原：${results.filter((i) => i.restore).length} 条；风格 LUT：${style.filmLut ? '用' : '不用'}；柔光：${style.mist ? style.mist.mode : '不用'}）` })
   const succeeded = results.filter((item) => item.grade && item.restore)
+  const completed = results.filter((item) => item.grade && item.restore && item.effects?.ok)
+  const unsupported = results[0]?.effects?.unsupported ?? []
+  const missingEffects = [...new Set(results.flatMap((item) => item.effects?.missing ?? []))]
   return {
-    ok: results.length > 0 && succeeded.length === results.length,
+    ok: results.length > 0 && completed.length === results.length,
     style: { key: style.key, label: style.label, sources: style.sources, techniques: style.techniques },
-    applied: succeeded.length,
-    failed: results.filter((item) => !(item.grade && item.restore)).map((item) => ({ itemId: item.itemId, grade: item.grade, restore: item.restore, restoreError: item.restoreError })),
+    applied: completed.length,
+    failed: results.filter((item) => !(item.grade && item.restore && item.effects?.ok)).map((item) => ({ itemId: item.itemId, grade: item.grade, restore: item.restore, restoreError: item.restoreError, missingEffects: item.effects?.missing ?? [] })),
+    effects: { plan: planStyleEffects(style), unsupported, missing: missingEffects, requiredApplied: completed.length === results.length },
     total: results.length,
     results,
     note: '风格 = 影调+色彩分离+局部+质感；LUT/柔光只在风格配方要求时使用；还原按机型单独处理',

@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.11.12 — 实时预览接线 + 风格必需效果验收（本地版）
+
+- **实时预览真正接进 UI**：调色页新增「实时预览 / 分屏对比」卡片（现行/原素材/L1/L2/L3 + 左右分屏选择），调用 `preview.live` / `preview.compare`；客户端测试断言 op 已被调用，不再是 host 有实现、UI 无入口
+- **风格必需效果验收**：新增 `lib/style_effects.mjs`（planStyleEffects / summarizeStyleEffects）
+  - 颗粒/暗角：当前 Color API 无法落地，明确标为 `unsupported`，不计入成功，并在返回里给出替代方法
+  - Film LUT / 柔光：作为 required，挂载失败 → `ok:false`、`effects.missing` 列出缺项
+  - 一键风格把 `style.grain` 作为质感意图传给建图（节点 15 记录），但不再谎称"已加颗粒"
+
 ## 0.11.11 — 测试可复现性 / 数据目录 / 预览文件名（本地版）
 
 - **`npm test` 可用**：`package.json` 增加 `"test": "node --test --test-concurrency=1"`，干净解包 31/31 通过；串行也避开 `overlay` 改 `vision.swift` mtime 与 `cutout` 重编的跨进程竞争
