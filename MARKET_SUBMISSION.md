@@ -89,5 +89,9 @@ npm install davinci-console-demo@0.11.0
 - [x] GitHub 仓库 + tag `v0.11.0`
 - [x] README / USER_MANUAL / LICENSE
 - [x] 依赖自检与平台守卫
-- [ ] 市场要求的截图/GIF（建议 3 张：面板总览、还原卡片、交付卡片）
-- [ ] 联系人/支持邮箱：<填写>
+- [x] 市场要求的截图/GIF：
+  - `screenshots/panel-top.png`（面板总览：依赖自检/三步/预检）
+  - `screenshots/panel-restore-style-delivery.png`（还原、10 个风格、交付参数与确认、调试日志）
+  - `screenshots/result-teal-orange.jpg`（青橙效果抽帧）
+  - `screenshots/panel-tour.gif`（动态演示）
+- [x] 联系人/支持邮箱：2504836725@qq.com
