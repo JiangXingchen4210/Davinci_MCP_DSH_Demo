@@ -8,6 +8,10 @@ import os from 'node:os'
 import fs from 'node:fs/promises'
 import { apply } from '../index.js'
 
+// 测试用自己的数据目录：不写用户 ~/Documents，也不受只读 HOME 影响
+const TEST_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'davinci-console-test-'))
+process.env.DAVINCI_CONSOLE_DATA_DIR = TEST_DATA_DIR
+
 let failures = 0
 const assert = (cond, msg) => { if (!cond) { failures += 1; console.log(`  FAIL ${msg}`) } }
 const tick = () => new Promise((resolve) => setImmediate(resolve))
@@ -217,6 +221,14 @@ async function testTrackReadErrors() {
   try { await runPreview(tool3, { itemId: 'missing', stage: 'current', width: 64 }) } catch (error) { err3 = error }
   assert(err3 && err3.message.includes('missing'), `不存在时应包含目标 ID，实际 ${err3?.message}`)
 
+  // 两次同秒预览不得共用同一文件名（stamp 只到秒，必须再带序号）
+  const { tool: tool5 } = await setup({ nodes: [], tracks: { 1: ['clip'] }, trackCount: 1 })
+  const p1 = await runPreview(tool5, { itemId: 'clip', stage: 'current', width: 64 })
+  const p2 = await runPreview(tool5, { itemId: 'clip', stage: 'current', width: 64 })
+  assert(p1?.ok && p2?.ok, '两次 current 预览都应成功')
+  assert(p1.path && p2.path && p1.path !== p2.path, `同秒两次预览的图片路径必须不同，实际 ${p1.path} / ${p2.path}`)
+  assert(p1.path.startsWith(process.env.DAVINCI_CONSOLE_DATA_DIR), '预览文件应写在测试数据目录内')
+
   // 目标在 V5 正常定位
   const s4 = { nodes: [{ index: 10, label: 'L3 · 10 x', enabled: true }], tracks: { 1: [], 2: [], 3: [], 4: [], 5: ['clip'] }, trackCount: 5 }
   const { tool: tool4 } = await setup(s4)
@@ -232,5 +244,6 @@ await testProbeFailure()
 await testCompareFailure()
 await testTrackReadErrors()
 
+await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
 if (failures) { console.error(`FAIL host_integration.test.mjs — ${failures} 项失败`); process.exitCode = 1 }
 else console.log('PASS host_integration.test.mjs — 恢复失败/false 返回值、重叠预览锁、读图失败、分屏失败、轨道读取错误均按预期')

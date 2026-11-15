@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.11.11 — 测试可复现性 / 数据目录 / 预览文件名（本地版）
+
+- **`npm test` 可用**：`package.json` 增加 `"test": "node --test --test-concurrency=1"`，干净解包 31/31 通过；串行也避开 `overlay` 改 `vision.swift` mtime 与 `cutout` 重编的跨进程竞争
+- **数据目录可覆盖**：新增 `DAVINCI_CONSOLE_DATA_DIR`（默认仍是 `~/Documents/resolve-console`）；Host 集成测试改用系统临时目录，不再写用户目录
+- **cutout 测试在缺 Swift 工具链时 SKIP**：不再把"没装 Xcode"报成失败（插件运行用随包 `bin/davinci-vision`，不需要工具链）
+- **预览文件名不再同秒覆盖**：`live-<秒>-<序号>.jpg` / `live-src-<秒>-<序号>.jpg`；测试断言同秒两次预览路径不同
+- 测试断言：预览文件必须落在配置的数据目录内
+
 ## 0.11.10 — 第一批可信度修复（曲线 / 还原决策 / 剪辑入出点）· 本地版
 
 - **Panasonic V-Log 曲线修正**：按官方公式 `V=c·log10(L+b)+d`（log 内是 L+b，不是 5.6L+b）；18% 灰 = 0.423311；黑位 0.125、分段点 0.181、线性 1.0 = 0.599118；解码与 .cube 采样用三线性核对

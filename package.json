@@ -1,6 +1,6 @@
 {
   "name": "davinci-console-demo",
-  "version": "0.11.10",
+  "version": "0.11.11",
   "private": false,
   "description": "[DEMO] DaVinci Resolve 调色/剪辑控制台：灰片还原（官方 LUT 自动匹配/下载）、三层 15 节点调色图、10 个风格库、黑白柔、遮罩/跟踪、剧本导入、交付审批。需要 macOS + DaVinci Resolve Studio + Resolve MCP。",
   "type": "module",
@@ -87,5 +87,8 @@
   "homepage": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo#readme",
   "bugs": {
     "url": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/issues"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1"
   }
 }

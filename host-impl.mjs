@@ -43,7 +43,9 @@ const previewState = { renderInProgress: false, lastStageByItem: new Map() }
 const MEDIA_PATH = '/davinci-panel/media'
 const MAX_BODY_BYTES = 32 * 1024 * 1024
 const CALL_TIMEOUT_MS = 300_000
-const DATA_DIR = path.join(os.homedir(), 'Documents', 'resolve-console')
+// 允许测试/便携安装覆盖数据目录（默认仍是 ~/Documents/resolve-console）
+const DATA_ROOT = process.env.DAVINCI_CONSOLE_DATA_DIR?.trim() || path.join(os.homedir(), 'Documents', 'resolve-console')
+const DATA_DIR = DATA_ROOT
 /** 调试日志：插件界面和对话里都能看到「现在在干什么、用了什么工具、目的是什么」。 */
 const BUNDLED_LUT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'assets', 'luts', 'official')
 
@@ -214,6 +216,7 @@ async function seekToItem(ctx, signal, itemId) {
 // ---------------------------------------------------------------------------
 
 let frameSequence = 0
+let previewSequence = 0
 
 /** 用 Project.ExportCurrentFrameAsStill 把当前播放头画面写成 PNG（带当前调色）。 */
 async function captureRenderedFrame(ctx, signal, label = 'frame') {
@@ -4342,7 +4345,7 @@ async function restoreNodeStates(ctx, signal, itemId, nodes) {
 async function capturePreviewBase64(ctx, signal, width = 640) {
   const captured = await captureRenderedFrame(ctx, signal, 'preview')
   const dir = await ensureDataDir('previews')
-  const outPath = path.join(dir, `live-${stamp()}.jpg`)
+  const outPath = path.join(dir, `live-${stamp()}-${++previewSequence}.jpg`)
   await run('ffmpeg', ['-v', 'error', '-i', captured.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
   const bytes = await fs.readFile(outPath)
   return { path: outPath, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}` }
@@ -4390,7 +4393,7 @@ async function opPreviewLive(ctx, args, signal) {
       const source = await exportSourceFrame(ctx, signal, item.id)
       if (!source?.path) throw new Error('抓不到原素材帧')
       const dir = await ensureDataDir('previews')
-      const outPath = path.join(dir, `live-src-${stamp()}.jpg`)
+      const outPath = path.join(dir, `live-src-${stamp()}-${++previewSequence}.jpg`)
       await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
       const bytes = await fs.readFile(outPath)
       return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode }
