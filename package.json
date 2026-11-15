@@ -77,5 +77,13 @@
       ]
     },
     "notes": "LUT 官方包不随主包发布（授权原因），首次使用通过 restore.ensure 从厂商官方直链下载；本机已下载的 LUT 放在用户 LUT 目录或插件 data/luts/official。"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo.git"
+  },
+  "homepage": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo#readme",
+  "bugs": {
+    "url": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/issues"
   }
 }
