@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 0.11.7 — 预览状态安全 + 交付停止/回滚/比较规则 + 跨轨定位
+
+- **分层预览改变原节点状态**：新增 `lib/preview_state.mjs`（normalizeNodes/planStageEnabled/planRestore/summarizeRestore）；节点状态未知时**零次写节点**并返回可解释错误；恢复按原始开关逐条写回；恢复失败在结果里给出节点编号
+- **删除任务失败仍继续交付**：新增 `lib/delivery_rules.mjs` 的 `parseDeleteResult`（支持布尔与 {success}）；首个任务删除未确认成功即停止（不改项目、不再建任务、不启动），返回 jobId 与删除结果
+- **回滚提示与真实状态不一致**：`summarizeRestore` 区分「未改动 / 已全部恢复 / 未完全恢复」，文案列出设置名、原值、读回值；所有失败出口复用同一结论，不再用已重置的 projectChanged 推断
+- **帧率比较三处不一致**：`valuesEqual` 统一规则（帧率数值+容差、宽高整数、空值无效），用于任务规格核对、项目设置写后校验、回滚读回校验
+- **指定高轨片段只查 V1**：新增 `lib/timeline_lookup.mjs`；`resolveItemContext`/`seekToItem` 指定 itemId 时按**实际视频轨数量**逐轨查找（空轨不提前结束），未指定时保留 V1 默认行为
+- 新增回归测试：`preview_state.test.mjs`、`delivery_rules.test.mjs`、`timeline_lookup.test.mjs`
+
 ## 0.11.6 — 分层预览不再改原调色 + 交付回滚/校验加固
 
 - **分层预览会改原调色节点**：预览前保存每个节点的原始开关，`finally` 里按原状态逐一还原（不再一律 L3 全开；抓帧失败也会还原）

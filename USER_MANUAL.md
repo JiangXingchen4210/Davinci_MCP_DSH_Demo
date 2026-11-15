@@ -1,4 +1,4 @@
-# 达芬奇调色控制台 · 使用手册（v0.11.6）
+# 达芬奇调色控制台 · 使用手册（v0.11.7）
 
 > 插件名：`@local/davinci-console`（DSH Web 侧边栏「插件 → 达芬奇调色控制台」）
 > 后端：DaVinci Resolve Studio **Patched 21.2**（`/Applications/DaVinci Resolve/DaVinci Resolve.app`）+ Resolve MCP

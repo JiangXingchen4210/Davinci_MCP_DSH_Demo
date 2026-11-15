@@ -1,4 +1,4 @@
-# davinci-console（0.11.6 · DEMO）
+# davinci-console（0.11.7 · DEMO）
 
 ![npm](https://img.shields.io/npm/v/davinci-console-demo?label=npm)
 ![demo](https://img.shields.io/badge/status-DEMO-orange)
@@ -7,7 +7,7 @@
 
 DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在浏览器面板里完成「素材 → 还原 → 调色/风格 → 交付」的完整流程，所有动作通过 **Resolve MCP** 驱动本机 DaVinci Resolve Studio。
 
-> ⚠️ 这是 **Demo 版（0.11.6）**：核心链路已可用，擦除（erase）等实验功能明确标记 DEMO/禁用；请在真实交付前自行复核画面。
+> ⚠️ 这是 **Demo 版（0.11.7）**：核心链路已可用，擦除（erase）等实验功能明确标记 DEMO/禁用；请在真实交付前自行复核画面。
 
 ## 功能
 
@@ -35,7 +35,7 @@ DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在�
 
 ```bash
 # DSH 市场/包安装
-npm install davinci-console-demo@0.11.6
+npm install davinci-console-demo@0.11.7
 # 或在 DSH 的插件管理中按包名安装后启用
 ```
 

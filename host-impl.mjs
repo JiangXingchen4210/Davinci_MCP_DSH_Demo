@@ -151,19 +151,36 @@ async function listVideoItems(ctx, signal, trackIndex = 1) {
   return items.filter((entry) => entry && entry.kind === 'clip')
 }
 
-/** 把播放头移到某个片段起点（跨轨道查找），返回该片段。 */
+async function videoTrackCount(ctx, signal) {
+  const r = await settle(callTool(ctx, 'timeline', { action: 'get_track_count', track_type: 'video' }, signal))
+  const count = Number(r.ok ? r.value?.count ?? r.value : NaN)
+  return Number.isFinite(count) && count > 0 ? count : 1
+}
+
+/** 在**全部**视频轨上查片段（空轨不提前结束；不假设只有 V1–V4）。 */
+async function findItemAcrossTracks(ctx, signal, itemId) {
+  const { findVideoTrackForItem, notFoundError } = await importFresh('lib/timeline_lookup.mjs')
+  const count = await videoTrackCount(ctx, signal)
+  const tracks = []
+  for (let trackIndex = 1; trackIndex <= count; trackIndex += 1) {
+    tracks.push({ trackIndex, items: await listVideoItems(ctx, signal, trackIndex) })
+  }
+  const hit = findVideoTrackForItem(tracks, itemId)
+  return { hit, count, error: hit ? null : notFoundError(itemId, count) }
+}
+
+/** 把播放头移到某个片段起点（按实际视频轨查找），返回该片段。 */
 async function seekToItem(ctx, signal, itemId) {
   let found = null
-  for (const trackIndex of [1, 2, 3, 4]) {
-    const items = await listVideoItems(ctx, signal, trackIndex)
-    const hit = items.find((entry) => entry.id === itemId)
-    if (hit) {
-      found = { item: hit, trackIndex }
-      break
-    }
-    if (trackIndex > 1 && items.length === 0) break
+  if (itemId) {
+    const { hit, error } = await findItemAcrossTracks(ctx, signal, itemId)
+    if (!hit) return { ok: false, error }
+    found = { item: hit.item, trackIndex: hit.trackIndex }
+  } else {
+    const items = await listVideoItems(ctx, signal, 1)
+    if (items[0]) found = { item: items[0], trackIndex: 1 }
   }
-  if (!found) return { ok: false, error: `时间线 V1–V4 上找不到 ${itemId}` }
+  if (!found) return { ok: false, error: `时间线 V1–V${await videoTrackCount(ctx, signal)} 上找不到片段 ${itemId ?? '(未指定)'}` }
 
   const current = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
   const startFrame = Number(current.ok ? current.value?.start_frame : 0) || 0
@@ -1944,9 +1961,18 @@ async function ffprobeJson(filePath) {
 }
 
 async function resolveItemContext(ctx, signal, itemId) {
-  const items = await listVideoItems(ctx, signal, 1)
-  const item = (itemId ? items.find((entry) => entry.id === itemId) : items[0]) ?? null
-  if (!item) throw new Error('V1 上没有片段')
+  let item = null
+  let trackIndex = 1
+  if (itemId) {
+    const { hit, error } = await findItemAcrossTracks(ctx, signal, itemId)
+    if (!hit) throw new Error(error)
+    item = hit.item
+    trackIndex = hit.trackIndex
+  } else {
+    const items = await listVideoItems(ctx, signal, 1)
+    item = items[0] ?? null
+    if (!item) throw new Error('V1 上没有片段（未指定 itemId 时默认取 V1 第一条；可用 itemId 指定其它轨）')
+  }
   const info = await clipSourceInfo(ctx, signal, item)
   let clipProperties = null
   if (info.clipId) {
@@ -1955,7 +1981,7 @@ async function resolveItemContext(ctx, signal, itemId) {
     )
     clipProperties = props.ok ? (props.value?.properties ?? null) : null
   }
-  return { item, info, clipProperties }
+  return { item, info, clipProperties, trackIndex }
 }
 
 async function sampleSourceStats(ctx, signal, info, fps) {
@@ -3938,22 +3964,15 @@ async function opRenderDeliver(ctx, args, signal) {
     height: Number(job.FormatHeight) || null,
     fps: job.FrameRate != null ? String(job.FrameRate) : null,
   }) : null
-  const codecKey = (value) => {
-    const n = String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '')
-    if (n === 'HEVC' || n === 'H265') return 'H265'
-    return n // H264 / PRORES422HQ 等
-  }
-  const specMatches = (spec) => Boolean(spec)
-    && Number(spec.width) === plan.width
-    && Number(spec.height) === plan.height
-    && Math.abs(Number(spec.fps) - Number(plan.fps)) < 0.001
-    && String(spec.format ?? '').toLowerCase() === plan.format.toLowerCase()
-    && codecKey(spec.codec) === codecKey(plan.codec)
+  const { parseDeleteResult, valuesEqual, specMatches, summarizeRestore } = await importFresh('lib/delivery_rules.mjs')
+  const specOk = (spec) => specMatches(spec, plan)
   const deleteJob = async (jobId) => {
     if (!jobId) return { ok: false, skipped: true, error: '没有 job_id' }
     const r = await settle(callTool(ctx, 'render', { action: 'delete_job', job_id: jobId }, signal))
-    const ok = Boolean(r.ok && r.value?.success !== false)
-    return { ok, error: ok ? null : messageOf(r.error) }
+    const parsed = parseDeleteResult(r.ok ? r.value : null)
+    const del = { ok: Boolean(r.ok && parsed.ok), raw: parsed.raw, error: r.ok ? (parsed.reason ?? null) : messageOf(r.error) }
+    if (!del.ok) debugPush({ stage: '交付', message: `删除渲染任务失败（job ${jobId}）：${del.error ?? '返回未确认成功'}` })
+    return del
   }
 
   // ① 先按渲染任务建一次，看任务读回是否已符合方案（能不动项目就不动项目）
@@ -3970,60 +3989,65 @@ async function opRenderDeliver(ctx, args, signal) {
     return r.ok ? r.value?.settings ?? null : null
   }
   const restoreProject = async () => {
-    if (!projectChanged) return { restored: false, details: [] }
+    const changedBefore = projectChanged
+    if (!changedBefore) return { ...summarizeRestore(false, []), details: [] }
     const details = []
     for (const [name, value] of Object.entries(oldValues)) {
-      if (value == null) { details.push({ name, expected: null, ok: false, error: '旧值未知，无法恢复' }); continue }
+      if (value == null) { details.push({ name, expected: null, actual: await readSetting(name), ok: false }); continue }
       const r = await settle(callTool(ctx, 'project_settings', { action: 'set_setting', name, value }, signal))
       const actual = await readSetting(name)
-      details.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && String(actual ?? '').trim() === String(value).trim()) })
+      details.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && valuesEqual(name, value, actual)) })
     }
     projectChanged = false
-    const restored = details.every((item) => item.ok)
-    if (!restored) debugPush({ stage: '交付', message: `项目设置恢复失败：${details.filter((i) => !i.ok).map((i) => i.name).join(',')}` })
-    return { restored, details }
+    const summary = summarizeRestore(changedBefore, details)
+    if (summary.state === 'partial') debugPush({ stage: '交付', message: summary.message })
+    return summary
   }
 
   // ② 任务规格不符 → 保存旧项目值、改项目、重新建任务再核对；任何一步失败都恢复旧值且不启动
-  if (!specMatches(spec)) {
+  if (!specOk(spec)) {
     for (const name of ['timelineResolutionWidth', 'timelineResolutionHeight', 'timelineFrameRate']) oldValues[name] = await readSetting(name)
     const unknown = Object.entries(oldValues).filter(([, value]) => value == null).map(([name]) => name)
     if (unknown.length) {
       const del = await deleteJob(jobId)
-      return { ok: false, plan, requested, spec, error: `读不到原项目设置（${unknown.join('、')}），为避免改坏工程已中止${del.ok ? '（任务已删除）' : '（任务删除失败，可能仍在队列：' + (del.error ?? '未知') + '）'}` }
+      return { ok: false, plan, requested, spec, jobId, deleteJob: del, error: `读不到原项目设置（${unknown.join('、')}），为避免改坏工程已中止；${del.ok ? '任务已删除' : '任务删除失败，仍留在队列（job ' + jobId + '），请手动检查'}` }
     }
-    const del = await deleteJob(jobId)
+    // 首个任务删除未确认成功 → 立即停止交付（不改项目、不再建任务、不启动）
+    const delFirst = await deleteJob(jobId)
+    if (!delFirst.ok) {
+      return { ok: false, plan, requested, spec, jobId, deleteJob: delFirst, error: `首个渲染任务规格不符，且删除未确认成功（job ${jobId} 可能仍在队列），已停止交付；未修改项目设置、未创建新任务、未启动渲染` }
+    }
     const applied = []
     for (const [name, value] of [['timelineResolutionWidth', String(plan.width)], ['timelineResolutionHeight', String(plan.height)], ['timelineFrameRate', String(plan.fps)]]) {
       projectChanged = true
       const r = await settle(callTool(ctx, 'project_settings', { action: 'set_setting', name, value }, signal))
       const actual = await readSetting(name)
-      applied.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && String(actual ?? '').trim() === value) })
+      applied.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && valuesEqual(name, value, actual)) })
       if (!applied[applied.length - 1].ok) {
         const restore = await restoreProject()
-        return { ok: false, plan, requested, writes: applied, spec, restore, error: `项目设置未能按方案落地（${name}: ${actual ?? '写入失败'}），已恢复原项目设置并中止，未创建/启动渲染任务` }
+        return { ok: false, plan, requested, writes: applied, spec, restore, error: `项目设置未能按方案落地（${name}: ${actual ?? '写入失败'}），已中止；${restore.message}` }
       }
     }
     writes = applied
     const second = await prepareJob()
     if (!second.prepared.ok) {
       const restore = await restoreProject()
-      return { ok: false, plan, requested, writes, spec, restore, error: `改用项目设置后重建渲染任务失败：${messageOf(second.prepared.error)}${restore.restored ? '' : '（项目设置未能完全恢复，请手动检查）'}` }
+      return { ok: false, plan, requested, writes, spec, restore, error: `改用项目设置后重建渲染任务失败：${messageOf(second.prepared.error)}；${restore.message}` }
     }
     if (!second.jobId) {
       const restore = await restoreProject()
-      return { ok: false, plan, requested, writes, error: `重建渲染任务没有返回 job_id，已中止${restore.restored ? '（项目设置已恢复）' : '（项目设置恢复失败，请手动检查）'}` }
+      return { ok: false, plan, requested, writes, restore, error: `重建渲染任务没有返回 job_id，已中止；${restore.message}` }
     }
     jobId = second.jobId
     job = await readJob(jobId)
     spec = jobSpecOf(job)
   }
 
-  const specMismatch = !specMatches(spec)
+  const specMismatch = !specOk(spec)
   if (specMismatch) {
     const del = await deleteJob(jobId)
     const restore = await restoreProject()
-    return { ok: false, plan, requested, writes, spec, specMismatch: true, restore, deleteJob: del, error: `渲染任务规格与方案不一致（任务：${JSON.stringify(spec)}），未启动渲染；${del.ok ? '任务已删除' : '任务删除失败，可能仍在队列：' + (del.error ?? '未知')}；${restore.restored ? '项目设置已恢复' : '项目设置恢复失败，请手动检查'}` }
+    return { ok: false, plan, requested, writes, spec, specMismatch: true, restore, deleteJob: del, error: `渲染任务规格与方案不一致（任务：${JSON.stringify(spec)}），未启动渲染；${del.ok ? '任务已删除' : '任务删除失败，仍留在队列（job ' + jobId + '）'}；${restore.message}` }
   }
 
   // ③ 只有「拿到 job_id + 规格核对通过」才允许启动
@@ -4039,7 +4063,7 @@ async function opRenderDeliver(ctx, args, signal) {
     const del = await deleteJob(jobId)
     const restore = await restoreProject()
     const reason = startValue === false ? '渲染后端明确返回 false' : (messageOf(started.error) || `启动结果异常：${JSON.stringify(startValue)}`)
-    return { ok: false, plan, requested, writes, spec, jobId, deleteJob: del, restore, error: `渲染任务启动失败（${reason}）；${del.ok ? '任务已删除' : '任务删除失败，可能仍在队列'}；${restore.restored ? '项目设置已恢复' : projectChanged ? '项目设置恢复失败，请手动检查' : '未改动项目设置'}` }
+    return { ok: false, plan, requested, writes, spec, jobId, deleteJob: del, restore, error: `渲染任务启动失败（${reason}）；${del.ok ? '任务已删除' : '任务删除失败，仍留在队列（job ' + jobId + '）'}；${restore.message}` }
   }
   debugPush({ stage: '交付', message: `已按方案创建、核对并启动渲染任务：${jobId}（${plan.format} ${plan.codec} ${plan.width}x${plan.height} ${plan.fps}fps ${plan.bitrateMbps}Mbps）` })
   return {
@@ -4249,37 +4273,28 @@ async function opGradeBuild3(ctx, args, signal) {
 async function readLayeredNodes(ctx, signal, itemId) {
   const outcome = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(itemId) }, signal))
   const nodes = (outcome.ok ? outcome.value?.nodes : []) ?? []
-  return nodes.map((node) => {
-    const label = String(node.label ?? node.tools?.join(' ') ?? '')
-    const index = Number(node.node_index ?? nodes.indexOf(node) + 1)
-    // 标签形如「L1 · 02 白平衡」：层号取前缀 Lx，节点号取 · 之后的数字（不能取到 L1 的 1）
-    const layerMatch = /^\s*L([123])\b/i.exec(label)
-    const numberMatch = /·\s*(\d+)/.exec(label) ?? /(\d+)/.exec(label)
-    const number = numberMatch ? Number(numberMatch[1]) : index
-    const layer = layerMatch ? `L${layerMatch[1]}` : number <= 4 ? 'L1' : number <= 9 ? 'L2' : 'L3'
-    const enabled = typeof node.enabled === 'boolean' ? node.enabled : (typeof node.is_enabled === 'boolean' ? node.is_enabled : null)
-    return { index, number, label, layer, tools: node.tools ?? [], lut: node.lut ?? '', enabled }
-  })
+  const { normalizeNodes } = await importFresh('lib/preview_state.mjs')
+  return normalizeNodes(nodes)
 }
 
-/** 按 stage 设置节点开关：L1 / L2 / L3 依次叠加，source = 全部关闭。 */
-async function applyStageEnabled(ctx, signal, itemId, nodes, stage) {
-  const enabledUpTo = stage === 'source' ? 0 : stage === 'L1' ? 4 : stage === 'L2' ? 9 : 999
-  for (const node of nodes) {
-    const enabled = node.number <= enabledUpTo
-    await settle(callTool(ctx, 'graph', { action: 'set_node_enabled', node_index: node.index, enabled, source: 'item', ...scopeOf(itemId) }, signal))
+/** 执行节点开关写入计划；任一写入返回失败会记录在结果里。 */
+async function applyNodeWrites(ctx, signal, itemId, writes) {
+  const results = []
+  for (const write of writes) {
+    const r = await settle(callTool(ctx, 'graph', { action: 'set_node_enabled', node_index: write.index, enabled: write.enabled, source: 'item', ...scopeOf(itemId) }, signal))
+    results.push({ index: write.index, enabled: write.enabled, ok: Boolean(r.ok && r.value?.success !== false) })
   }
+  return results
 }
 
-/** 恢复预览前的原始节点开关状态；enabled 未知的节点保守地打开（旧数据没有状态字段）。 */
+/** 按预览前的原始状态恢复节点开关；状态未知时不做任何写入。 */
 async function restoreNodeStates(ctx, signal, itemId, nodes) {
-  const restored = []
-  for (const node of nodes) {
-    const enabled = typeof node.enabled === 'boolean' ? node.enabled : true
-    const r = await settle(callTool(ctx, 'graph', { action: 'set_node_enabled', node_index: node.index, enabled, source: 'item', ...scopeOf(itemId) }, signal))
-    restored.push({ index: node.index, enabled, ok: Boolean(r.ok) })
-  }
-  return restored
+  const { planRestore } = await importFresh('lib/preview_state.mjs')
+  const plan = planRestore(nodes)
+  if (!plan.ok) return { ok: false, reason: plan.reason, error: plan.error, failed: plan.unknown, results: [] }
+  const results = await applyNodeWrites(ctx, signal, itemId, plan.writes)
+  const failed = results.filter((item) => !item.ok).map((item) => item.index)
+  return { ok: failed.length === 0, failed, results }
 }
 
 async function capturePreviewBase64(ctx, signal, width = 640) {
@@ -4318,21 +4333,46 @@ async function opPreviewLive(ctx, args, signal) {
   }
   const stageKey = `${item.id}:${stage}`
   const alreadyAtStage = previewState.lastStageByItem.get(item.id) === stage
-  const originalStates = nodes.map((node) => ({ ...node }))
+  const { planStageEnabled } = await importFresh('lib/preview_state.mjs')
+  // 先规划：状态不可靠时**一次节点写入都不发**
+  const stagePlan = planStageEnabled(nodes, stage)
+  if (!stagePlan.ok) {
+    return { ok: false, reason: stagePlan.reason, stage, itemId: item.id, error: stagePlan.error, unknownNodes: stagePlan.unknown, writes: 0 }
+  }
+  let frame = null
+  let captureError = null
+  const restoreSummary = { restored: true, failed: [] }
   try {
-    // 同一 stage 重复轮询不必再逐个开关节点（13 次 SetNodeEnabled 会让预览卡住）
-    if (!alreadyAtStage) await applyStageEnabled(ctx, signal, item.id, nodes, stage)
-    previewState.lastStageByItem.set(item.id, stage)
-    const frame = await capturePreviewBase64(ctx, signal, width)
-    return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length, stages: nodes.reduce((acc, node) => { acc[node.layer] = (acc[node.layer] ?? 0) + 1; return acc }, {}) }
-  } finally {
-    // 恢复：抓帧失败也会执行；按预览前的**原始开关状态**逐一还原，而不是一律 L3 全开
     if (!alreadyAtStage) {
-      const restored = await restoreNodeStates(ctx, signal, item.id, originalStates)
+      const stageResults = await applyNodeWrites(ctx, signal, item.id, stagePlan.writes)
+      const stageFailed = stageResults.filter((item2) => !item2.ok).map((item2) => item2.index)
+      if (stageFailed.length) {
+        return { ok: false, stage, itemId: item.id, error: `切换节点开关失败：节点 ${stageFailed.join(', ')}`, stageFailed }
+      }
+    }
+    previewState.lastStageByItem.set(item.id, stage)
+    frame = await capturePreviewBase64(ctx, signal, width)
+  } catch (error) {
+    captureError = error
+  } finally {
+    if (!alreadyAtStage) {
+      const restored = await restoreNodeStates(ctx, signal, item.id, nodes)
+      restoreSummary.restored = Boolean(restored.ok)
+      restoreSummary.failed = restored.failed ?? []
+      restoreSummary.error = restored.error ?? null
       previewState.lastStageByItem.delete(item.id)
-      if (restored.some((item) => !item.ok)) debugPush({ stage: '预览', message: `节点开关还原部分失败：${restored.filter((i) => !i.ok).map((i) => i.index).join(',')}` })
+      if (!restored.ok) debugPush({ stage: '预览', message: `节点开关恢复失败：${(restored.failed ?? []).join(',') || restored.error || '未知原因'}` })
     }
   }
+  if (captureError) {
+    const error = new Error(`${captureError.message}${restoreSummary.restored ? '' : `；且节点开关未完全恢复（节点 ${restoreSummary.failed.join(', ')}）`}`)
+    error.restore = restoreSummary
+    throw error
+  }
+  if (!restoreSummary.restored) {
+    return { ok: false, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, error: `预览已抓帧，但节点开关未完全恢复（节点 ${restoreSummary.failed.join(', ')}），请手动检查`, restore: restoreSummary }
+  }
+  return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length, restore: restoreSummary, stages: nodes.reduce((acc, node) => { acc[node.layer] = (acc[node.layer] ?? 0) + 1; return acc }, {}) }
 }
 
 /** 分屏对比：左右各一个 stage，一次返回两张图。 */
