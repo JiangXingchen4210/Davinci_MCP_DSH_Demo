@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.11.3
+
+- 文档与版本对齐：README / USER_MANUAL 版本号更新到 0.11.3
+- 邮箱工具增强：`mail_fetch.py read` 支持**一次读多封**（`read 2823 2825` 或 `--uids 2823,2825`）
+- 发布链路：GitHub Actions → npm Trusted Publisher（OIDC + provenance）稳定可用
+
 ## 0.11.2（验证 npm 可信发布）
 
 - 验证 GitHub Actions → npm Trusted Publisher（OIDC）发布链路

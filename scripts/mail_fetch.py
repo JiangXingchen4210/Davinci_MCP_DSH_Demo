@@ -197,7 +197,31 @@ def fetch_message(conn, uid: str | None, index: int | None) -> tuple[Message, di
 
 def cmd_read(args) -> None:
     conn = connect()
-    msg, meta = fetch_message(conn, args.uid, args.index)
+    uids: list[str] = []
+    if args.uids:
+        uids = [u.strip() for u in str(args.uids).split(",") if u.strip()]
+    elif isinstance(args.uid, list) and args.uid:
+        uids = [str(u) for u in args.uid]
+    if len(uids) > 1:
+        out_all = []
+        for uid in uids:
+            msg, meta = fetch_message(conn, uid, None)
+            text = body_of(msg)
+            out_all.append({"meta": meta, "body": text})
+            if not args.json:
+                print(f"===== uid={uid} | {meta['date']} | {meta['from']}")
+                print("主题：" + meta["subject"])
+                print(text[:1500])
+                print()
+        if args.json:
+            print(json.dumps(out_all, ensure_ascii=False, indent=2))
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(out_all, ensure_ascii=False, indent=2))
+            print(f"saved: {args.out}")
+        conn.logout()
+        return
+    msg, meta = fetch_message(conn, uids[0] if uids else args.uid, args.index)
     text = body_of(msg)
     out = {"meta": meta, "body": text}
     if args.json:
@@ -222,8 +246,9 @@ def main(argv: Iterable[str] | None = None) -> None:
     p_list.add_argument("--unread", action="store_true")
     p_list.add_argument("--from", dest="from_", default=None)
     p_list.add_argument("--json", action="store_true")
-    p_read = sub.add_parser("read", help="读取一封邮件")
-    p_read.add_argument("uid", nargs="?", default=None)
+    p_read = sub.add_parser("read", help="读取一封或多封邮件")
+    p_read.add_argument("uid", nargs="*", default=None, help="一个或多个 uid（空格分隔）")
+    p_read.add_argument("--uids", default=None, help="逗号分隔的 uid 列表，如 2823,2825")
     p_read.add_argument("--index", type=int, default=1, help="按列表序号读（1=最新）")
     p_read.add_argument("--json", action="store_true")
     p_read.add_argument("--out", default=None)
