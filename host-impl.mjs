@@ -16,6 +16,7 @@ import { execFile, spawn } from 'node:child_process'
 import { promises as fs, createReadStream } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -3150,7 +3151,11 @@ async function opPreviewRender(ctx, args, signal) {
   const outPath = path.join(dir, `${name}.mp4`)
   const width = Math.max(320, Math.min(1920, Number(args.width) || 960))
   const height = Math.round((width * 9) / 16 / 2) * 2
+  let previewPath = outPath
   previewState.renderInProgress = true
+  let jobId = null
+  let started = null
+  try {
   const prepared = await settle(
     callTool(
       ctx,
@@ -3169,9 +3174,9 @@ async function opPreviewRender(ctx, args, signal) {
       signal,
     ),
   )
-  const jobId = prepared.ok ? prepared.value?.job_id ?? null : null
+  jobId = prepared.ok ? prepared.value?.job_id ?? null : null
   if (!jobId) return { ok: false, error: prepared.ok ? '没有拿到 job_id' : messageOf(prepared.error), prepared: prepared.value ?? null }
-  const started = await settle(callTool(ctx, 'render', { action: 'start', params: { job_ids: [jobId] } }, signal))
+  started = await settle(callTool(ctx, 'render', { action: 'start', params: { job_ids: [jobId] } }, signal))
   // 轮询（最多 args.waitSec 秒；预览片很短）
   const deadline = Date.now() + Math.min(600, Math.max(20, Number(args.waitSec) || 120)) * 1000
   let status = null
@@ -3182,7 +3187,6 @@ async function opPreviewRender(ctx, args, signal) {
     if (status && /完成|Complete/i.test(String(status.JobStatus ?? ''))) break
   }
   // 渲染出的是项目分辨率；按请求宽度再缩一份小预览（否则面板里放 1080p 文件又慢又大）
-  let previewPath = outPath
   const renderedStat = await fs.stat(outPath).catch(() => null)
   if (renderedStat && renderedStat.size > 10240) {
     const scaledPath = path.join(dir, `${name}-${width}w.mp4`)
@@ -3193,7 +3197,9 @@ async function opPreviewRender(ctx, args, signal) {
       previewPath = outPath
     }
   }
-  previewState.renderInProgress = false
+  } finally {
+    previewState.renderInProgress = false
+  }
   const exists = await fs.stat(previewPath).catch(() => null)
   return {
     ok: Boolean(exists && exists.size > 10240),
@@ -3707,7 +3713,7 @@ async function opDepsCheck(ctx, args, signal) {
     mcp = version.ok ? { ok: true, version: version.value?.version_string ?? null } : { ok: false, error: messageOf(version.error) }
   } catch (error) { mcp = { ok: false, error: messageOf(error) } }
   const appCandidates = ['/Applications/DaVinci Resolve/DaVinci Resolve.app', '/Applications/DaVinci Resolve.app']
-  const resolveApp = appCandidates.find((candidate) => { try { return fs.existsSync(candidate) } catch { return false } }) ?? null
+  const resolveApp = appCandidates.find((candidate) => { try { return existsSync(candidate) } catch { return false } }) ?? null
   return {
     ok: Boolean(mcp.ok && ffmpeg && resolveApp),
     platform: process.platform,
@@ -3729,21 +3735,36 @@ async function opPreflightCheck(ctx, args, signal) {
   const structure = await settle(callTool(ctx, 'timeline', { action: 'probe_timeline_structure', track_types: ['video', 'audio'] }, signal))
   const missing = []
   let itemCount = 0
-  for (const track of structure.ok ? structure.value?.tracks?.video?.tracks ?? [] : []) {
-    for (const item of track.items ?? []) {
-      itemCount += 1
-      if (item.file_exists === false || item.media_status === 'Offline') missing.push({ name: item.name, path: item.file_path ?? null, status: item.media_status ?? 'Offline' })
+  const timelineReadable = Boolean(structure.ok && structure.value)
+  // 音视频轨都检查：独立音轨上的离线素材同样会导致渲染失败
+  for (const type of ['video', 'audio']) {
+    const tracks = structure.ok ? structure.value?.tracks?.[type]?.tracks ?? [] : []
+    for (const track of tracks) {
+      for (const item of track.items ?? []) {
+        itemCount += 1
+        if (item.file_exists === false || item.media_status === 'Offline') {
+          missing.push({ trackType: type, name: item.name, path: item.file_path ?? null, status: item.media_status ?? 'Offline' })
+        }
+      }
     }
   }
+  const blockedReasons = []
+  if (!timelineReadable) blockedReasons.push('读不到时间线结构（没有打开时间线，或 MCP 调用失败）')
+  if (timelineReadable && itemCount === 0) blockedReasons.push('时间线上没有可渲染的片段')
+  if (missing.length) blockedReasons.push(`${missing.length} 条素材离线/丢失`)
+  const ok = timelineReadable && itemCount > 0 && missing.length === 0
   const settings = snapshot.settings?.value?.settings ?? snapshot.settings?.value ?? {}
   return {
-    ok: missing.length === 0,
+    ok,
+    blocked: !ok,
+    blockedReasons,
+    timelineReadable,
     project: { name: snapshot.project?.name ?? null, science: settings.colorScienceMode ?? null, timeline: settings.colorSpaceTimeline ?? null, output: settings.colorSpaceOutput ?? null, resolution: settings.timelineResolutionWidth ? `${settings.timelineResolutionWidth}x${settings.timelineResolutionHeight}` : null, fps: settings.timelineFrameRate ?? null },
     pipeline: { ok: (diagnosis.findings ?? []).length === 0, findings: (diagnosis.findings ?? []).map((item) => ({ id: item.id, title: item.title, fixable: Boolean(item.recommended) })) },
-    timeline: { name: structure.ok ? structure.value?.name ?? null : null, items: itemCount },
+    timeline: { name: structure.ok ? structure.value?.name ?? null : null, items: itemCount, readable: timelineReadable },
     missingMedia: missing,
-    renderReady: missing.length === 0 && itemCount > 0,
-    note: missing.length ? `检测到 ${missing.length} 条离线/丢失素材：先重链再渲染` : '素材在线，可以进入调色/渲染',
+    renderReady: ok,
+    note: blockedReasons.length ? `预检未通过：${blockedReasons.join('；')}` : '素材在线，可以进入调色/渲染',
   }
 }
 
@@ -3772,19 +3793,21 @@ async function opStyleOneClick(ctx, args, signal) {
       if (resolved.needsRestore === false) restore = { ok: true, note: '素材已是彩色，无需还原' }
       else if (resolved.needsChoice) return { ok: false, needsChoice: true, restore: resolved, message: '库里同曲线有多条 LUT，请先在「还原」卡片里选一条再应用风格' }
       else if (resolved.needsLut) return { ok: false, needsLut: true, restore: resolved, message: resolved.message }
-      else if (resolved.lut) {
+      else if (resolved.lut?.path) {
         const applied = await opRestoreApply(ctx, { itemId, lutPath: resolved.lut.path }, signal)
-        restore = { ok: Boolean(applied.ok), lut: resolved.lut.name }
+        restore = { ok: Boolean(applied.ok), lutPath: resolved.lut.path, lutName: resolved.lut.name ?? path.basename(String(resolved.lut.path)) }
       }
     } catch (error) { restore = { ok: false, error: messageOf(error) } }
     // ② 风格：三层 15 节点，按配方改参数（不是套 LUT）
     const built = await opGradeBuild3(ctx, { itemId, lookPreset: style.key, lookStrength: 0, styleStrength: 0.95, recipe: style.recipe, skipStyleLut: true }, signal).catch((error) => ({ ok: false, error: messageOf(error) }))
-    // build3 重建会清掉节点上的 LUT：还原需要在 build 之后再落一次（用同一份 LUT）
-    if (restore?.lut) {
+    // build3 重建会清掉节点上的 LUT：用**同一份** lutPath 在 build 之后补挂，失败就标失败（不再假装成功）
+    if (restore?.lutPath) {
       try {
-        const lutPath = (await opRestoreResolve(ctx, { itemId }, signal))?.lut?.path
-        if (lutPath) restore = { ...restore, ok: Boolean((await opRestoreApply(ctx, { itemId, lutPath }, signal)).ok) }
-      } catch { /* 保持原结果 */ }
+        const reapplied = await opRestoreApply(ctx, { itemId, lutPath: restore.lutPath }, signal)
+        restore = { ...restore, ok: Boolean(reapplied.ok), reapplied: Boolean(reapplied.ok) }
+      } catch (error) {
+        restore = { ...restore, ok: false, error: messageOf(error) }
+      }
     }
     // ③ 可选：胶片模拟 LUT（仅当风格明确指定，且用 DaVinci 自带 Film Looks）
     let filmLut = null
@@ -3796,7 +3819,7 @@ async function opStyleOneClick(ctx, args, signal) {
     }
     // ④ 可选：柔光（只有风格需要才加）
     const mist = style.mist ? await opTextureMist(ctx, { itemId, mode: style.mist.mode, strength: style.mist.strength }, signal).catch(() => ({ ok: false })) : null
-    results.push({ itemId, restore: Boolean(restore?.ok), grade: Boolean(built?.ok), nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: Boolean(filmLut?.ok), mist: mist ? Boolean(mist.ok) : null })
+    results.push({ itemId, restore: Boolean(restore?.ok), restoreLut: restore?.lutPath ? path.basename(String(restore.lutPath)) : null, restoreError: restore?.error ?? null, grade: Boolean(built?.ok), nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: Boolean(filmLut?.ok), mist: mist ? Boolean(mist.ok) : null })
   }
   debugPush({ stage: '风格', message: `风格「${style.label}」完成：${results.filter((item) => item.grade).length}/${results.length} 条（还原：${results.filter((i) => i.restore).length} 条；风格 LUT：${style.filmLut ? '用' : '不用'}；柔光：${style.mist ? style.mist.mode : '不用'}）` })
   return {
@@ -3809,38 +3832,127 @@ async function opStyleOneClick(ctx, args, signal) {
   }
 }
 
-/** 交付：两段式——先给方案（不含 token 不渲染），用户确认后才渲染。 */
+/** 交付：两段式——先生成方案；确认时校验项目/时间线、规格落地、令牌一次性。 */
 const DELIVERY_PLANS = new Map()
-async function opRenderDeliver(ctx, args, signal) {
-  if (!args.confirmToken) {
-    const preflight = await opPreflightCheck(ctx, {}, signal)
-    if (!preflight.ok) return { ok: false, blocked: true, preflight, error: `预检未通过：${preflight.missingMedia.length} 条素材离线，不能交付` }
+
+async function currentProjectTimeline(ctx, signal) {
+  const [project, timeline] = await Promise.all([
+    settle(callTool(ctx, 'project_manager', { action: 'get_current' }, signal)),
+    settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal)),
+  ])
+  return {
+    project: project.ok ? (project.value?.name ?? null) : null,
+    timeline: timeline.ok ? (timeline.value?.name ?? null) : null,
+    timelineId: timeline.ok ? (timeline.value?.id ?? null) : null,
   }
+}
+
+/** 容器/编码映射：容器按用户选择走（mov/mp4 都支持），编码默认 H.264，H.265/ProRes 显式选择。 */
+function resolveDeliveryFormat(container, codecArg) {
+  const fmt = ['mov', 'mp4'].includes(String(container).toLowerCase()) ? String(container).toLowerCase() : 'mp4'
+  const key = String(codecArg ?? '').toLowerCase()
+  if (key.includes('prores')) return { format: 'mov', codec: 'ProRes 422 HQ' }
+  if (key.includes('265') || key.includes('hevc')) return { format: fmt, codec: 'H.265' }
+  return { format: fmt, codec: 'H.264' }
+}
+
+async function opRenderDeliver(ctx, args, signal) {
   const width = Math.max(320, Math.min(8192, Number(args.width) || 1920))
   const height = Math.max(180, Math.min(4320, Number(args.height) || 1080))
   const fps = Math.max(1, Math.min(120, Number(args.fps) || 24))
   const bitrateMbps = Math.max(1, Math.min(500, Number(args.bitrateMbps) || 20))
   const container = String(args.container ?? 'mp4').toLowerCase()
+  const mapped = resolveDeliveryFormat(container, args.codec)
   const targetDir = String(args.targetDir ?? path.join(os.homedir(), 'Desktop', '交付'))
+
+  // ---------- 第一段：生成方案（不渲染，不写项目设置） ----------
   if (!args.confirmToken) {
+    const preflight = await opPreflightCheck(ctx, {}, signal)
+    if (!preflight.ok) {
+      return { ok: false, blocked: true, preflight, error: `预检未通过，不能进入交付：${(preflight.blockedReasons ?? []).join('；') || '时间线不可用'}` }
+    }
+    const scope = await currentProjectTimeline(ctx, signal)
     const token = `deliver-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-    DELIVERY_PLANS.set(token, { width, height, fps, bitrateMbps, container, targetDir, at: Date.now() })
-    return { ok: true, approvalRequired: true, confirmToken: token, plan: { width, height, fps, bitrateMbps, container, targetDir }, message: `交付方案：${width}x${height} / ${fps}fps / ${bitrateMbps}Mbps / ${container} → ${targetDir}；确认后才会渲染` }
+    DELIVERY_PLANS.set(token, {
+      width, height, fps, bitrateMbps, container: mapped.format, format: mapped.format, codec: mapped.codec,
+      targetDir, scope, at: Date.now(),
+    })
+    return {
+      ok: true,
+      approvalRequired: true,
+      confirmToken: token,
+      plan: { width, height, fps, bitrateMbps, container, codec: mapped.codec, format: mapped.format, targetDir, project: scope.project, timeline: scope.timeline },
+      message: `交付方案：${width}x${height} / ${fps}fps / ${bitrateMbps}Mbps / ${mapped.format.toUpperCase()} ${mapped.codec} → ${targetDir}；确认后才会渲染`,
+    }
   }
-  const plan = DELIVERY_PLANS.get(String(args.confirmToken))
-  if (!plan) return { ok: false, error: '确认令牌无效或已过期，请重新生成交付方案' }
-  await fs.mkdir(plan.targetDir, { recursive: true }).catch(() => null)
-  // 项目分辨率/帧率：先尝试写入（不支持时如实说明并沿用项目值）
+
+  // ---------- 第二段：确认并渲染（令牌一次性 + 绑定项目/时间线） ----------
+  const token = String(args.confirmToken)
+  const plan = DELIVERY_PLANS.get(token)
+  if (!plan) return { ok: false, error: '确认令牌无效或已使用/过期：请重新生成交付方案' }
+  DELIVERY_PLANS.delete(token) // 一次性：先消费，后续任何失败都不允许重放
+
+  const nowScope = await currentProjectTimeline(ctx, signal)
+  if (!plan.scope?.project || !nowScope.project || plan.scope.project !== nowScope.project) {
+    return { ok: false, error: `确认令牌与当前项目不匹配（方案项目：${plan.scope?.project ?? '未知'}，当前：${nowScope.project ?? '未知'}）；请重新生成方案`, plan }
+  }
+  if (!plan.scope?.timeline || !nowScope.timeline || plan.scope.timeline !== nowScope.timeline) {
+    return { ok: false, error: `确认令牌与当前时间线不匹配（方案时间线：${plan.scope?.timeline ?? '未知'}，当前：${nowScope.timeline ?? '未知'}）；请重新生成方案`, plan }
+  }
+  const preflight = await opPreflightCheck(ctx, {}, signal)
+  if (!preflight.ok) {
+    return { ok: false, blocked: true, preflight, plan, error: `确认时预检未通过：${(preflight.blockedReasons ?? []).join('；')}` }
+  }
+
+  await fs.mkdir(plan.targetDir, { recursive: true }).catch((error) => debugPush({ stage: '交付', message: `创建输出目录失败：${messageOf(error)}` }))
+  // 规格落地：分辨率/帧率写入项目设置；任一失败就中止（不再带着不符的规格去建任务）
   const writes = []
   for (const [name, value] of [['timelineResolutionWidth', String(plan.width)], ['timelineResolutionHeight', String(plan.height)], ['timelineFrameRate', String(plan.fps)]]) {
     const r = await settle(callTool(ctx, 'project_settings', { action: 'set_setting', name, value }, signal))
-    writes.push({ name, value, ok: Boolean(r.ok && r.value?.success !== false) })
+    const read = await settle(callTool(ctx, 'project_settings', { action: 'get_setting', name }, signal))
+    const actual = read.ok ? read.value?.settings ?? null : null
+    writes.push({ name, expected: value, actual, ok: Boolean(r.ok && r.value?.success !== false && String(actual ?? '').trim() === value) })
   }
-  const prepared = await settle(callTool(ctx, 'render', { action: 'prepare_render_job', target_dir: plan.targetDir, format: 'mp4', codec: 'H.264', custom_name: `交付_${plan.width}x${plan.height}_${Date.now()}`, settings: { ExportVideo: true, ExportAudio: true }, require_temp_target: false }, signal))
+  const failedWrites = writes.filter((item) => !item.ok)
+  if (failedWrites.length) {
+    return { ok: false, plan, writes, error: `项目设置未能按方案落地（${failedWrites.map((item) => `${item.name}: ${item.actual ?? '写入失败'}`).join('；')}），已中止，未创建渲染任务` }
+  }
+
+  const settings = {
+    ExportVideo: true,
+    ExportAudio: true,
+    ...(plan.bitrateMbps ? { VideoQuality: plan.bitrateMbps } : {}),
+  }
+  const prepared = await settle(callTool(ctx, 'render', {
+    action: 'prepare_render_job',
+    target_dir: plan.targetDir,
+    format: plan.format,
+    codec: plan.codec,
+    custom_name: `交付_${plan.width}x${plan.height}_${plan.fps}fps_${plan.bitrateMbps}Mbps`,
+    settings,
+    require_temp_target: false,
+  }, signal))
   if (!prepared.ok) return { ok: false, plan, writes, error: messageOf(prepared.error) }
   const jobId = prepared.value?.job_id
-  const started = await settle(callTool(ctx, 'render', { action: 'start', job_ids: [jobId] }, signal))
-  return { ok: Boolean(started.ok), plan, writes, jobId, started: started.value ?? null, note: '已开始渲染；用 render.get_job_status / verify_output 查看结果' }
+  const readback = prepared.value?.before?.jobs?.find((job) => job.JobId === jobId) ?? null
+  const spec = {
+    requested: { width: plan.width, height: plan.height, fps: plan.fps, format: plan.format, codec: plan.codec, bitrateMbps: plan.bitrateMbps },
+    job: readback ? { format: readback.VideoFormat, codec: readback.VideoCodec, width: readback.FormatWidth, height: readback.FormatHeight, fps: readback.FrameRate } : null,
+  }
+  const started = await settle(callTool(ctx, 'render', { action: 'start', job_ids: jobId ? [jobId] : [] }, signal))
+  const jobOk = Boolean(started.ok && started.value?.success !== false)
+  debugPush({ stage: '交付', message: `已按方案创建并启动渲染任务：${jobId ?? '无 job' }（${plan.format} ${plan.codec} ${plan.width}x${plan.height} ${plan.fps}fps ${plan.bitrateMbps}Mbps）` })
+  return {
+    ok: jobOk,
+    plan,
+    writes,
+    jobId,
+    spec,
+    specMismatch: readback ? (Number(readback.FormatWidth) !== plan.width || Number(readback.FormatHeight) !== plan.height || String(readback.FrameRate) !== String(plan.fps)) : null,
+    started: started.value ?? null,
+    error: jobOk ? null : `渲染任务创建/启动失败：${messageOf(started.error)}`,
+    note: '令牌已一次性消费；规格已写入项目设置并校验，任务创建参数与方案一致',
+  }
 }
 
 /** Resolve 后台运行：把窗口隐藏，不占用前台（脚本仍可用）。 */
