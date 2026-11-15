@@ -4444,14 +4444,14 @@ async function opPreviewLive(ctx, args, signal) {
       return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length, timecode }
     }
     if (stage === 'source') {
-      const dir = await ensureDataDir('previews')
-      const outPath = path.join(dir, `live-src-${stamp()}-${++previewSequence}.jpg`)
-      // Resolve 侧抽帧：宿主机 ffmpeg 直读素材会卡住；实测 MCP extract_frames <1s
+      // 完全绕开宿主 ffmpeg（宿主解码视频会卡死）：直接用 Resolve 侧抽出的 JPEG
+      debugPush({ stage: '预览', message: 'source 分支：开始 MCP 抽源帧' })
       const source = await exportSourceFrame(ctx, signal, item.id)
+      debugPush({ stage: '预览', message: `source 分支：MCP 抽帧返回 ${source?.path ?? 'null'}` })
       if (!source?.path) throw new Error('抓不到原素材帧')
-      await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
-      const bytes = await fs.readFile(outPath)
-      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode, method: 'mcp-extract' }
+      const bytes = await fs.readFile(source.path)
+      if (!bytes?.length) throw new Error('抽出的源帧为空')
+      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: source.path, nodes: nodes.length, timecode, method: 'mcp-frame-direct', bytes: bytes.length }
     }
 
     const { planStageEnabled } = await importFresh('lib/preview_state.mjs')

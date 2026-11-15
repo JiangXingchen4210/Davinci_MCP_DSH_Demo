@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## 0.11.17 — source 预览真机打通（本地版）
+
+- 根因：宿主进程用 ffmpeg 解码任何视频文件都会卡住（图片正常；/tmp 小视频同样卡），与目录权限无关
+- source 预览改为**完全绕开宿主 ffmpeg**：直接使用 Resolve 侧 `extract_frames` 抽出的 JPEG 回传（`method: mcp-frame-direct`）
+- 真机验收（考试三_时间线 / Downloads 素材）：
+  - `current` 0.3s ✅
+  - `source` **1.3s ✅**（dataUrl 1.79MB，原图直传）
+  - `source vs current` 分屏 **1.3s ✅**
+- 分层预览仍按 `preview.capabilities` 置灰（MCP 不返回节点开关、节点列表 3/15）
+
 ## 0.11.16 — source 预览改走 Resolve 侧抽帧（本地版）
 
 - 移除宿主 ffmpeg 直读原始素材的路径（实测宿主机调起后读任何视频文件都不返回；/tmp 小文件同样如此，排除 TCC 目录问题）
