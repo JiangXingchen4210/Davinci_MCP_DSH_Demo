@@ -22,6 +22,10 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Node 22 自带的 npm 10 不支持 Trusted Publisher（OIDC 发布），必须升级到 npm 11+
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@11
+
       - name: Skip when this version is already on npm
         id: check
         run: |
