@@ -54,3 +54,14 @@ npm install davinci-console-demo@0.11.0
 ## License
 
 MIT
+
+
+## 反馈 / 报错
+
+- 面板底部「调试日志 → **反馈/报错**」：自动把环境（MCP/ffmpeg/Resolve 路径）、最近日志打包进预填 Issue，并保存一份到插件 data 目录；
+- 也可以直接开 [Issue](https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/issues/new/choose)，附版本号与日志；
+- 支持邮箱：2504836725@qq.com
+
+## Star / 使用反馈
+
+如果这个 DEMO 对你有用，欢迎 Star 仓库；遇到问题请提 Issue（附日志），我会按报错优先级修复并记录在 CHANGELOG。

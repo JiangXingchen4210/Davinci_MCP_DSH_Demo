@@ -5019,6 +5019,39 @@ async function opMediaImport(ctx, args, signal) {
   }
 }
 
+/** 生成可直接提交的问题反馈（环境 + 最近调试日志），返回 GitHub Issue 预填链接。 */
+async function opFeedbackIssue(ctx, args, signal) {
+  const deps = await opDepsCheck(ctx, {}, signal).catch(() => null)
+  const since = Number(args?.since) || 0
+  const entries = DEBUG_LOG.filter((entry) => entry.seq > since).slice(-80)
+  const logText = entries.map((entry) => `- [${entry.stage}] ${entry.node ? entry.node + ' · ' : ''}${entry.tool ? entry.tool + ' · ' : ''}${entry.message ?? ''}${entry.purpose ? '（目的：' + entry.purpose + '）' : ''}`).join('\n')
+  const title = `[Bug] ${String(args?.summary ?? '使用反馈').slice(0, 80)}`
+  const body = [
+    '### 发生了什么',
+    String(args?.detail ?? '').slice(0, 4000) || '（请补充：哪个按钮、什么现象、期望结果）',
+    '',
+    '### 复现步骤',
+    '1. ',
+    '2. ',
+    '',
+    '### 环境',
+    '```json',
+    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.11.0' }, null, 2),
+    '```',
+    '',
+    '### 调试日志（最近）',
+    '```',
+    logText || '（无）',
+    '```',
+  ].join('\n')
+  const url = `https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body.slice(0, 7000))}`
+  const dir = await ensureDataDir('feedback')
+  const file = path.join(dir, `feedback-${stamp()}.md`)
+  await fs.writeFile(file, `# ${title}\n\n${body}\n`, 'utf8').catch(() => null)
+  debugPush({ stage: '反馈', message: `已生成反馈草稿：${file}` })
+  return { ok: true, url, file, markdown: `# ${title}\n\n${body}` }
+}
+
 function opDebugLog(ctx, args) {
   const since = Number(args?.since) || 0
   const entries = DEBUG_LOG.filter((entry) => entry.seq > since)
@@ -5116,6 +5149,7 @@ const OPS = {
   'overlay.plan': opOverlayPlan,
   'overlay.render': opOverlayRender,
   'deps.check': opDepsCheck,
+  'feedback.issue': opFeedbackIssue,
   'debug.log': opDebugLog,
   'debug.clear': opDebugClear,
   'ops.list': opOpsList,

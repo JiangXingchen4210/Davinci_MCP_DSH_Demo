@@ -354,6 +354,7 @@ window.__ModuleLoader__.load({
         'debug.title': 'Debug log (what the plugin is doing)',
         'debug.hint': 'Stage / node / tool / purpose / params, same wording as the chat',
         'debug.clear': 'Clear log',
+        'debug.feedback': 'Report a problem',
         'deliver.title': 'Delivery (needs your approval)',
         'deliver.hint': 'Pick size/fps/bitrate and generate a plan; rendering starts only after you confirm',
         'deliver.plan': 'Generate delivery plan',
@@ -1418,6 +1419,11 @@ window.__ModuleLoader__.load({
         return () => { alive = false; clearInterval(timer) }
       }, [])
 
+      const feedback = async () => {
+        const value = await run('feedback.issue', { summary: '插件反馈', detail: '' }, '反馈/报错')
+        if (value?.url) window.open(value.url, '_blank')
+      }
+
       const clearDebug = async () => {
         await run('debug.clear', {}, '清空调试日志')
         debugSeqRef.current = 0
@@ -1929,6 +1935,7 @@ window.__ModuleLoader__.load({
         {
           title: t('debug.title'),
           extra: h('div', { style: S.buttons },
+            h(Button, { onClick: feedback }, t('debug.feedback')),
             h(Button, { onClick: clearDebug }, t('debug.clear')),
           ),
         },
