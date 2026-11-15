@@ -1,0 +1,6 @@
+# Resolve 控制面板 bundle：一条落地到 Profile 的插入项。
+# Host 半边注册 /resolve-console/action 路由和 resolve_console 工具，Client 半边
+# 渲染侧边栏入口与中央面板（id 均为 davinci）。
+- insert:
+    - id: davinci-console
+      name: '@local/davinci-console'

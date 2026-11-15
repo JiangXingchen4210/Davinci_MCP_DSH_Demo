@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DaVinci control panel",
+    "description": "Colour grading and effects controls driven through the configured DaVinci Resolve MCP server: CDL grading, look presets, grade versions, grade copy, transform, crop, opacity and a Fusion blur."
+  }
+}

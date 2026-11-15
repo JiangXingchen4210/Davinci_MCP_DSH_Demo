@@ -1,0 +1,15 @@
+# 构建/运行产物
+lib/.build/
+node_modules/
+*.tgz
+.out/
+previews/
+.sessions/
+*.log
+
+# 本地生成数据
+docs/color-pipeline-notes-src/.cache
+.DS_Store
+
+# 第三方 LUT 本体（授权原因不入库，仅保留清单）
+assets/luts/official/dji/

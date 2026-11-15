@@ -1,0 +1,75 @@
+{
+ "vendor": "DJI",
+ "items": [
+  {
+   "file": "DJI Avata 2 D-Log M to Rec.709 V1._.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Avata 360 D-Log M to Rec.709 V1.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Flip D-Log M to Rec.709 V1_.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Lito X1 D-Log M to Rec.709 LUT.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mavic 3 D-Log M to Rec.709 V1.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mavic 3 D-Log to Rec.709 V1.cube",
+   "log": "D-Log",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mavic 3 D-Log to Rec.709 vivid V1.cube",
+   "log": "D-Log",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mavic 4 Pro D-Log M to Rec.709 V1.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mavic 4 Pro D-Log to Rec.709 V1.cube",
+   "log": "D-Log",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mavic 4 Pro D-Log to Rec.709 vivid V1.cube",
+   "log": "D-Log",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mini 4 Pro D-Log M to Rec.709 V1_.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI Mini 5 Pro D-Log M to Rec.709 LUT.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI O4 Air Unit Series D-Log M to Rec.709 V1._.cube",
+   "log": "D-Log M",
+   "target": "SDR (Rec.709)"
+  },
+  {
+   "file": "DJI_ZENMUSE_X9_DLog_To_Rec2020HLG.cube",
+   "log": "D-Log",
+   "target": "HDR (Rec.2020 HLG/PQ)"
+  }
+ ]
+}
