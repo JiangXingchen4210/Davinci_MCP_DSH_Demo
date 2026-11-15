@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.11.9 — 跨片段预览串帧修复（本地版）
+
+- **共享播放头全局锁**：预览锁从「按 itemId」改为「按播放头」；`current` / `source` / 分层预览全部纳入同一把锁，覆盖「定位→读原状态→切层→抓帧→恢复」整段，跨片段不会再串帧
+- 预览结果新增 `timecode` 字段（本次抓帧实际所在时间码）
+- 移除跨请求的 `lastStageByItem` 状态复用：每次预览都切层并在结束后按原状态恢复
+- **Host 集成测试同步点**：fake `export_frame_as_still` 显式发 `captureArrived` 信号；`testOverlappingPreviews` 等信号而非固定 tick 次数
+- 新增 `testCrossClipPreviewTimecode`：A 在 00:00:00:00、B 在 00:00:02:00，断言两次抓帧时间码与最终节点状态
+
 ## 0.11.8 — 预览状态安全（Host 集成回归）· 本地版
 
 - **节点写入按真实契约解析**：`parseNodeWriteResult` 支持布尔与 `{success}`；恢复返回 `false` 不再算成功

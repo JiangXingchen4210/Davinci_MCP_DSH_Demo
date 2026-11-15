@@ -11,6 +11,7 @@ import { apply } from '../index.js'
 let failures = 0
 const assert = (cond, msg) => { if (!cond) { failures += 1; console.log(`  FAIL ${msg}`) } }
 const tick = () => new Promise((resolve) => setImmediate(resolve))
+const deferred = () => { let resolve; const promise = new Promise((res) => { resolve = res }); return { promise, resolve } }
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
 
 function makeFake(state) {
@@ -48,7 +49,9 @@ async function dispatch(name, payload, state) {
   if (name.endsWith('__timeline') && action === 'get_items') {
     const idx = Number(params.track_index)
     if (state.trackItemsError?.includes(idx)) throw new Error(`V${idx} boom`)
-    const items = (state.tracks?.[idx] ?? []).map((id) => ({ id, kind: 'clip', start: 0 }))
+    const items = (state.tracks?.[idx] ?? []).map((entry) => (typeof entry === 'string'
+      ? { id: entry, kind: 'clip', start: 0 }
+      : { id: entry.id, kind: 'clip', start: Number(entry.start) || 0 }))
     return { items }
   }
   if (name.endsWith('__timeline_item_color') && action === 'probe_node_graph') {
@@ -69,13 +72,19 @@ async function dispatch(name, payload, state) {
     return { success: true }
   }
   if (name.endsWith('__project_settings') && action === 'export_frame_as_still') {
+    state.captureArrived?.resolve?.()
     if (state.captureGate) await state.captureGate
     if (state.captureError) throw new Error('capture boom')
     await fs.writeFile(params.path, PNG)
-    state.capturedStates.push({ at: 'capture', nodes: state.nodes.map((node) => ({ index: node.index, enabled: node.enabled })) })
+    state.captures.push({ timecode: state.playhead, nodes: state.nodes.map((node) => ({ index: node.index, enabled: node.enabled })) })
+    state.capturedStates.push({ at: 'capture', timecode: state.playhead, nodes: state.nodes.map((node) => ({ index: node.index, enabled: node.enabled })) })
     return { success: true }
   }
-  if (name.endsWith('__timeline_markers') && action === 'set_current_timecode') return { success: true }
+  if (name.endsWith('__timeline_markers') && action === 'set_current_timecode') {
+    state.playhead = payload.params?.timecode ?? null
+    state.seeks.push(state.playhead)
+    return { success: true }
+  }
   if (name.endsWith('__timeline_item') && action === 'get_media_pool_item') return { id: 'clip-1' }
   if (name.endsWith('__timeline_item') && ['get_source_start_frame', 'get_source_end_frame'].includes(action)) return { frame: 0 }
   if (name.endsWith('__media_pool_item') && action === 'get_clip_property') return { properties: { 'File Path': '/tmp/fake.mov' } }
@@ -86,6 +95,9 @@ async function dispatch(name, payload, state) {
 async function setup(state) {
   state.setNodeCalls = []
   state.capturedStates = []
+  state.captures = []
+  state.seeks = []
+  state.playhead = null
   const { ctx, calls } = makeFake(state)
   await apply(ctx)
   assert(Boolean(state.tool), '插件应注册 davinci_panel 工具')
@@ -119,12 +131,14 @@ async function testOverlappingPreviews() {
   const state = { nodes: [{ index: 10, label: 'L3 · 10 x', enabled: true }], tracks: { 1: ['clip'] } }
   let releaseA
   state.captureGate = new Promise((resolve) => { releaseA = resolve })
+  state.captureArrived = deferred()
   const { tool } = await setup(state)
   const a = runPreview(tool, { itemId: 'clip', stage: 'L1', width: 64 })
-  await tick(); await tick(); await tick()
+  // 等 A 明确到达抓帧（不靠 tick 次数猜测）
+  await state.captureArrived.promise
   const b = runPreview(tool, { itemId: 'clip', stage: 'L3', width: 64 })
-  await tick(); await tick()
-  // A 仍卡在抓帧；B 必须还没开始切节点（锁）
+  await tick()
+  // A 已进入抓帧；B 必须被共享播放头锁挡住，尚未写节点
   assert(state.setNodeCalls.length === 1, `B 不应在 A 完成前写节点，实际写入 ${state.setNodeCalls.length} 次`)
   state.captureGate = null
   releaseA()
@@ -133,10 +147,36 @@ async function testOverlappingPreviews() {
   assert(rb?.ok === true, `B 应成功，实际 ${JSON.stringify(rb?.error)}`)
   assert(state.nodes[0].enabled === true, `最终节点必须仍为开启，实际 ${state.nodes[0].enabled}`)
   assert(state.setNodeCalls.length === 4, `应有 4 次写入（A 切+还原，B 切+还原），实际 ${state.setNodeCalls.length}`)
-  const captures = state.capturedStates.filter((item) => item.at === 'capture')
+  const captures = state.captures
   assert(captures.length === 2, '两次抓帧都应发生')
-  const bCapture = captures[1]
-  assert(bCapture.nodes.find((n) => n.index === 10)?.enabled === true, 'B 抓帧时节点 10 应为开启（L3 stage）')
+  assert(captures[1].nodes.find((n) => n.index === 10)?.enabled === true, 'B 抓帧时节点 10 应为开启（L3 stage）')
+}
+
+async function testCrossClipPreviewTimecode() {
+  // A 在 00:00:00:00，B 在 00:00:02:00（24fps，start=48）；共享播放头必须串行
+  const state = {
+    nodes: [{ index: 10, label: 'L3 · 10 x', enabled: true }],
+    tracks: { 1: [{ id: 'clipA', start: 0 }, { id: 'clipB', start: 48 }] },
+  }
+  let releaseA
+  state.captureGate = new Promise((resolve) => { releaseA = resolve })
+  state.captureArrived = deferred()
+  const { tool } = await setup(state)
+  const a = runPreview(tool, { itemId: 'clipA', stage: 'L1', width: 64 })
+  await state.captureArrived.promise
+  // A 暂停在抓帧前；此时发起 B（current 也会移动播放头）
+  const b = runPreview(tool, { itemId: 'clipB', stage: 'current', width: 64 })
+  await tick()
+  assert(state.seeks.length === 1, `B 不应在 A 完成前移动播放头，实际 seek ${state.seeks.length} 次`)
+  state.captureGate = null
+  releaseA()
+  const [ra, rb] = await Promise.all([a, b])
+  assert(ra?.ok === true && rb?.ok === true, `两次预览都应成功：${ra?.error} / ${rb?.error}`)
+  assert(state.captures.length === 2, `应有两次抓帧，实际 ${state.captures.length}`)
+  assert(state.captures[0].timecode === '00:00:00:00', `A 抓帧时间码应为 00:00:00:00，实际 ${state.captures[0].timecode}`)
+  assert(state.captures[1].timecode === '00:00:02:00', `B 抓帧时间码应为 00:00:02:00，实际 ${state.captures[1].timecode}`)
+  assert(ra.timecode === '00:00:00:00' && rb.timecode === '00:00:02:00', `返回结果时间码不符：${ra.timecode} / ${rb.timecode}`)
+  assert(state.nodes[0].enabled === true, `最终节点必须仍为开启，实际 ${state.nodes[0].enabled}`)
 }
 
 async function testProbeFailure() {
@@ -187,6 +227,7 @@ async function testTrackReadErrors() {
 await testRestoreFalse()
 await testStageAndRestoreFail()
 await testOverlappingPreviews()
+await testCrossClipPreviewTimecode()
 await testProbeFailure()
 await testCompareFailure()
 await testTrackReadErrors()

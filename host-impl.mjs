@@ -4328,23 +4328,18 @@ async function capturePreviewBase64(ctx, signal, width = 640) {
 }
 
 /** 实时预览一帧：按 stage 临时开关节点 → 抓帧 → 恢复全部开启。 */
-/** 同一片段的预览串行化：保护「定位→读原状态→切层→抓帧→恢复」整段。 */
-const previewLocks = new Map()
-async function withPreviewLock(itemId, fn) {
-  const previous = previewLocks.get(itemId) ?? Promise.resolve()
+/** 共享播放头全局锁：所有预览（含 current/source）都从定位到抓帧、恢复整段串行。 */
+let previewPlayheadChain = Promise.resolve()
+async function withPreviewLock(fn) {
+  const previous = previewPlayheadChain
   let release
   const current = new Promise((resolve) => { release = resolve })
-  previewLocks.set(itemId, previous.then(() => current))
+  previewPlayheadChain = previous.then(() => current)
   await previous.catch(() => undefined)
   try {
     return await fn()
   } finally {
     release()
-    if (previewLocks.get(itemId) === current) previewLocks.delete(itemId)
-    else {
-      const tail = previewLocks.get(itemId)
-      if (tail) tail.finally(() => { if (previewLocks.get(itemId) === tail) previewLocks.delete(itemId) })
-    }
   }
 }
 
@@ -4365,9 +4360,10 @@ async function opPreviewLive(ctx, args, signal) {
       return { ok: false, stage, itemId: item.id, reason: 'probe_failed', error: probe.error, nodes: null }
     }
     const nodes = probe.nodes
+    const timecode = seek.timecode ?? null
     if (stage === 'current') {
       const frame = await capturePreviewBase64(ctx, signal, width)
-      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length }
+      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length, timecode }
     }
     if (stage === 'source') {
       const source = await exportSourceFrame(ctx, signal, item.id)
@@ -4376,11 +4372,11 @@ async function opPreviewLive(ctx, args, signal) {
       const outPath = path.join(dir, `live-src-${stamp()}.jpg`)
       await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
       const bytes = await fs.readFile(outPath)
-      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length }
+      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length, timecode }
     }
 
     const { planStageEnabled } = await importFresh('lib/preview_state.mjs')
-    const alreadyAtStage = previewState.lastStageByItem.get(item.id) === stage
+    const alreadyAtStage = false // 预览一律「切层→抓帧→按原状态恢复」，不做跨请求的状态复用
     const stagePlan = planStageEnabled(nodes, stage)
     if (!stagePlan.ok) {
       return { ok: false, reason: stagePlan.reason, stage, itemId: item.id, error: stagePlan.error, unknownNodes: stagePlan.unknown, writes: 0, nodes: nodes.length }
@@ -4390,12 +4386,13 @@ async function opPreviewLive(ctx, args, signal) {
     let captureError = null
     let stageResults = []
     let restoreResult = { ok: true, failed: [] }
+    let captureTimecode = null
     try {
       if (!alreadyAtStage) {
         stageResults = await applyNodeWrites(ctx, signal, item.id, stagePlan.writes)
       }
       if (stageResults.every((entry) => entry.ok)) {
-        previewState.lastStageByItem.set(item.id, stage)
+        captureTimecode = timecode
         frame = await capturePreviewBase64(ctx, signal, width)
       }
     } catch (error) {
@@ -4403,7 +4400,6 @@ async function opPreviewLive(ctx, args, signal) {
     } finally {
       if (!alreadyAtStage) {
         restoreResult = await restoreNodeStates(ctx, signal, item.id, nodes)
-        previewState.lastStageByItem.delete(item.id)
         if (!restoreResult.ok) debugPush({ stage: '预览', message: `节点开关恢复失败：${(restoreResult.failed ?? []).join(',') || restoreResult.error || '未知原因'}` })
       }
     }
@@ -4419,6 +4415,7 @@ async function opPreviewLive(ctx, args, signal) {
       itemName: info.name,
       dataUrl: frame?.dataUrl,
       path: frame?.path,
+      timecode: captureTimecode,
       nodes: nodes.length,
       stageFailed,
       restore,
@@ -4432,7 +4429,7 @@ async function opPreviewLive(ctx, args, signal) {
     }
     return merged
   }
-  return layered ? withPreviewLock(item.id, run) : run()
+  return withPreviewLock(run)
 }
 
 /** 分屏对比：两侧都拿到有效图像才算成功；左侧失败则立即停止。 */
