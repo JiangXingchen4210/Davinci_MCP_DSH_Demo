@@ -1,9 +1,11 @@
 name: publish
 
+# 默认只手动触发：配置好 npm Trusted Publisher（或 NPM_TOKEN）后，
+# 再把 release 触发打开，见下方注释。
 on:
-  release:
-    types: [published]
   workflow_dispatch:
+  # release:
+  #   types: [published]
 
 permissions:
   contents: read
@@ -20,14 +22,27 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Skip when this version is already on npm
+        id: check
+        run: |
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if npm view "davinci-console-demo@$V" version >/dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::davinci-console-demo@$V 已在 npm 上，跳过发布"
+          else
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # 方案 A（推荐）：npm 可信发布（Trusted Publisher / OIDC，无需 token）
-      # 需要先在 npm 包页 Settings → Trusted Publisher 里绑定本仓库与 workflow 名
+      # 先在 npm 包页 Settings → Trusted Publisher 绑定本仓库 + 本 workflow 文件名
       - name: Publish (trusted publishing)
+        if: steps.check.outputs.already_published == 'false'
         run: npm publish --provenance --access public
 
-      # 方案 B：改用 NPM_TOKEN（若没配 Trusted Publisher）
-      # 先把 token 存进仓库 Secrets：NPM_TOKEN
+      # 方案 B：仓库 Secrets 配 NPM_TOKEN 后启用这段（删掉上面的 Publish 步骤）
       # - name: Publish (token)
+      #   if: steps.check.outputs.already_published == 'false'
       #   run: npm publish --provenance --access public
       #   env:
       #     NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
