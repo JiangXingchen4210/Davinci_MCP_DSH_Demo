@@ -151,36 +151,53 @@ async function listVideoItems(ctx, signal, trackIndex = 1) {
   return items.filter((entry) => entry && entry.kind === 'clip')
 }
 
+/** 读视频轨数量：失败时保留错误，不把失败伪装成 1 条轨。 */
 async function videoTrackCount(ctx, signal) {
   const r = await settle(callTool(ctx, 'timeline', { action: 'get_track_count', track_type: 'video' }, signal))
-  const count = Number(r.ok ? r.value?.count ?? r.value : NaN)
-  return Number.isFinite(count) && count > 0 ? count : 1
+  if (!r.ok) return { ok: false, error: `读取视频轨数量失败：${messageOf(r.error)}` }
+  const count = Number(r.value?.count ?? r.value)
+  if (!Number.isFinite(count) || count < 0) return { ok: false, error: '视频轨数量不可用' }
+  return { ok: true, count }
 }
 
-/** 在**全部**视频轨上查片段（空轨不提前结束；不假设只有 V1–V4）。 */
+/** 读一条视频轨的片段：失败时保留错误（不转换成空列表）。 */
+async function listVideoItemsSafe(ctx, signal, trackIndex) {
+  const r = await settle(callTool(ctx, 'timeline', { action: 'get_items', track_type: 'video', track_index: trackIndex }, signal))
+  if (!r.ok) return { ok: false, error: `读取 V${trackIndex} 失败：${messageOf(r.error)}` }
+  const items = r.value?.items
+  if (!Array.isArray(items)) return { ok: false, error: `V${trackIndex} 的返回里没有 items 数组` }
+  return { ok: true, items: items.filter((entry) => entry && entry.kind === 'clip') }
+}
+
+/** 在**全部**视频轨上查片段：轨数/轨内容读取失败都要报错，只有完整扫描后确实不存在才报“找不到”。 */
 async function findItemAcrossTracks(ctx, signal, itemId) {
   const { findVideoTrackForItem, notFoundError } = await importFresh('lib/timeline_lookup.mjs')
-  const count = await videoTrackCount(ctx, signal)
+  const countResult = await videoTrackCount(ctx, signal)
+  if (!countResult.ok) return { ok: false, hit: null, count: null, error: countResult.error }
+  const count = Math.max(countResult.count, 1)
   const tracks = []
   for (let trackIndex = 1; trackIndex <= count; trackIndex += 1) {
-    tracks.push({ trackIndex, items: await listVideoItems(ctx, signal, trackIndex) })
+    const safe = await listVideoItemsSafe(ctx, signal, trackIndex)
+    if (!safe.ok) return { ok: false, hit: null, count, error: safe.error }
+    tracks.push({ trackIndex, items: safe.items })
   }
   const hit = findVideoTrackForItem(tracks, itemId)
-  return { hit, count, error: hit ? null : notFoundError(itemId, count) }
+  if (!hit) return { ok: false, hit: null, count, notFound: true, error: notFoundError(itemId, count) }
+  return { ok: true, hit, count, error: null }
 }
 
 /** 把播放头移到某个片段起点（按实际视频轨查找），返回该片段。 */
 async function seekToItem(ctx, signal, itemId) {
   let found = null
   if (itemId) {
-    const { hit, error } = await findItemAcrossTracks(ctx, signal, itemId)
-    if (!hit) return { ok: false, error }
-    found = { item: hit.item, trackIndex: hit.trackIndex }
+    const foundResult = await findItemAcrossTracks(ctx, signal, itemId)
+    if (!foundResult.hit) return { ok: false, error: foundResult.error }
+    found = { item: foundResult.hit.item, trackIndex: foundResult.hit.trackIndex }
   } else {
     const items = await listVideoItems(ctx, signal, 1)
     if (items[0]) found = { item: items[0], trackIndex: 1 }
   }
-  if (!found) return { ok: false, error: `时间线 V1–V${await videoTrackCount(ctx, signal)} 上找不到片段 ${itemId ?? '(未指定)'}` }
+  if (!found) return { ok: false, error: `时间线上找不到片段 ${itemId ?? '(未指定)'}` }
 
   const current = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
   const startFrame = Number(current.ok ? current.value?.start_frame : 0) || 0
@@ -1964,10 +1981,10 @@ async function resolveItemContext(ctx, signal, itemId) {
   let item = null
   let trackIndex = 1
   if (itemId) {
-    const { hit, error } = await findItemAcrossTracks(ctx, signal, itemId)
-    if (!hit) throw new Error(error)
-    item = hit.item
-    trackIndex = hit.trackIndex
+    const foundResult = await findItemAcrossTracks(ctx, signal, itemId)
+    if (!foundResult.hit) throw new Error(foundResult.error)
+    item = foundResult.hit.item
+    trackIndex = foundResult.hit.trackIndex
   } else {
     const items = await listVideoItems(ctx, signal, 1)
     item = items[0] ?? null
@@ -4272,17 +4289,21 @@ async function opGradeBuild3(ctx, args, signal) {
 /** 读当前片段的节点图并按「层」分类（01-04=L1 / 05-09=L2 / 10+=L3）。 */
 async function readLayeredNodes(ctx, signal, itemId) {
   const outcome = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(itemId) }, signal))
-  const nodes = (outcome.ok ? outcome.value?.nodes : []) ?? []
   const { normalizeNodes } = await importFresh('lib/preview_state.mjs')
-  return normalizeNodes(nodes)
+  if (!outcome.ok) return { ok: false, nodes: [], error: `读取节点图失败：${messageOf(outcome.error)}` }
+  const raw = outcome.value?.nodes
+  if (!Array.isArray(raw)) return { ok: false, nodes: [], error: '节点图返回里没有 nodes 数组（无法确认节点状态）' }
+  return { ok: true, nodes: normalizeNodes(raw) }
 }
 
 /** 执行节点开关写入计划；任一写入返回失败会记录在结果里。 */
 async function applyNodeWrites(ctx, signal, itemId, writes) {
+  const { parseNodeWriteResult } = await importFresh('lib/preview_state.mjs')
   const results = []
   for (const write of writes) {
     const r = await settle(callTool(ctx, 'graph', { action: 'set_node_enabled', node_index: write.index, enabled: write.enabled, source: 'item', ...scopeOf(itemId) }, signal))
-    results.push({ index: write.index, enabled: write.enabled, ok: Boolean(r.ok && r.value?.success !== false) })
+    const parsed = parseNodeWriteResult(r.ok ? r.value : null)
+    results.push({ index: write.index, enabled: write.enabled, ok: Boolean(r.ok && parsed.ok), reason: parsed.reason ?? (r.ok ? null : messageOf(r.error)) })
   }
   return results
 }
@@ -4307,84 +4328,133 @@ async function capturePreviewBase64(ctx, signal, width = 640) {
 }
 
 /** 实时预览一帧：按 stage 临时开关节点 → 抓帧 → 恢复全部开启。 */
+/** 同一片段的预览串行化：保护「定位→读原状态→切层→抓帧→恢复」整段。 */
+const previewLocks = new Map()
+async function withPreviewLock(itemId, fn) {
+  const previous = previewLocks.get(itemId) ?? Promise.resolve()
+  let release
+  const current = new Promise((resolve) => { release = resolve })
+  previewLocks.set(itemId, previous.then(() => current))
+  await previous.catch(() => undefined)
+  try {
+    return await fn()
+  } finally {
+    release()
+    if (previewLocks.get(itemId) === current) previewLocks.delete(itemId)
+    else {
+      const tail = previewLocks.get(itemId)
+      if (tail) tail.finally(() => { if (previewLocks.get(itemId) === tail) previewLocks.delete(itemId) })
+    }
+  }
+}
+
 async function opPreviewLive(ctx, args, signal) {
   const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
   const stage = ['current', 'source', 'L1', 'L2', 'L3'].includes(args.stage) ? args.stage : 'current'
   const width = Number(args.width) || 640
-  const seek = await seekToItem(ctx, signal, item.id)
-  if (!seek.ok) throw new Error(`无法定位片段：${seek.error}`)
   if (previewState.renderInProgress && stage !== 'current' && stage !== 'source' && args.allowDuringRender !== true) {
     return { ok: false, busy: true, stage, itemId: item.id, error: '预览渲染进行中：实时预览暂停（渲染完成后自动恢复）' }
   }
-  const nodes = await readLayeredNodes(ctx, signal, item.id)
-  if (stage === 'current') {
-    const frame = await capturePreviewBase64(ctx, signal, width)
-    return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length }
-  }
-  if (stage === 'source') {
-    // 原素材：直接从源文件抓（不含任何调色）
-    const source = await exportSourceFrame(ctx, signal, item.id)
-    if (!source?.path) throw new Error('抓不到原素材帧')
-    const dir = await ensureDataDir('previews')
-    const outPath = path.join(dir, `live-src-${stamp()}.jpg`)
-    await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
-    const bytes = await fs.readFile(outPath)
-    return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length }
-  }
-  const stageKey = `${item.id}:${stage}`
-  const alreadyAtStage = previewState.lastStageByItem.get(item.id) === stage
-  const { planStageEnabled } = await importFresh('lib/preview_state.mjs')
-  // 先规划：状态不可靠时**一次节点写入都不发**
-  const stagePlan = planStageEnabled(nodes, stage)
-  if (!stagePlan.ok) {
-    return { ok: false, reason: stagePlan.reason, stage, itemId: item.id, error: stagePlan.error, unknownNodes: stagePlan.unknown, writes: 0 }
-  }
-  let frame = null
-  let captureError = null
-  const restoreSummary = { restored: true, failed: [] }
-  try {
-    if (!alreadyAtStage) {
-      const stageResults = await applyNodeWrites(ctx, signal, item.id, stagePlan.writes)
-      const stageFailed = stageResults.filter((item2) => !item2.ok).map((item2) => item2.index)
-      if (stageFailed.length) {
-        return { ok: false, stage, itemId: item.id, error: `切换节点开关失败：节点 ${stageFailed.join(', ')}`, stageFailed }
+  const layered = stage !== 'current' && stage !== 'source'
+  const run = async () => {
+    const seek = await seekToItem(ctx, signal, item.id)
+    if (!seek.ok) throw new Error(`无法定位片段：${seek.error}`)
+    const probe = await readLayeredNodes(ctx, signal, item.id)
+    // 依赖节点图的阶段：读图失败必须返回原因，不能当“空图”成功
+    if (layered && !probe.ok) {
+      return { ok: false, stage, itemId: item.id, reason: 'probe_failed', error: probe.error, nodes: null }
+    }
+    const nodes = probe.nodes
+    if (stage === 'current') {
+      const frame = await capturePreviewBase64(ctx, signal, width)
+      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length }
+    }
+    if (stage === 'source') {
+      const source = await exportSourceFrame(ctx, signal, item.id)
+      if (!source?.path) throw new Error('抓不到原素材帧')
+      const dir = await ensureDataDir('previews')
+      const outPath = path.join(dir, `live-src-${stamp()}.jpg`)
+      await run('ffmpeg', ['-v', 'error', '-i', source.path, '-vf', `scale=${Math.max(240, Math.min(1280, width))}:-2`, '-frames:v', '1', '-q:v', '3', '-y', outPath], { timeoutMs: 60_000 })
+      const bytes = await fs.readFile(outPath)
+      return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`, path: outPath, nodes: nodes.length }
+    }
+
+    const { planStageEnabled } = await importFresh('lib/preview_state.mjs')
+    const alreadyAtStage = previewState.lastStageByItem.get(item.id) === stage
+    const stagePlan = planStageEnabled(nodes, stage)
+    if (!stagePlan.ok) {
+      return { ok: false, reason: stagePlan.reason, stage, itemId: item.id, error: stagePlan.error, unknownNodes: stagePlan.unknown, writes: 0, nodes: nodes.length }
+    }
+    // 关键：切换 / 抓帧 / 恢复 三件事先收集，等清理完成后统一组装返回（不在 try 里提前 return）
+    let frame = null
+    let captureError = null
+    let stageResults = []
+    let restoreResult = { ok: true, failed: [] }
+    try {
+      if (!alreadyAtStage) {
+        stageResults = await applyNodeWrites(ctx, signal, item.id, stagePlan.writes)
+      }
+      if (stageResults.every((entry) => entry.ok)) {
+        previewState.lastStageByItem.set(item.id, stage)
+        frame = await capturePreviewBase64(ctx, signal, width)
+      }
+    } catch (error) {
+      captureError = error
+    } finally {
+      if (!alreadyAtStage) {
+        restoreResult = await restoreNodeStates(ctx, signal, item.id, nodes)
+        previewState.lastStageByItem.delete(item.id)
+        if (!restoreResult.ok) debugPush({ stage: '预览', message: `节点开关恢复失败：${(restoreResult.failed ?? []).join(',') || restoreResult.error || '未知原因'}` })
       }
     }
-    previewState.lastStageByItem.set(item.id, stage)
-    frame = await capturePreviewBase64(ctx, signal, width)
-  } catch (error) {
-    captureError = error
-  } finally {
-    if (!alreadyAtStage) {
-      const restored = await restoreNodeStates(ctx, signal, item.id, nodes)
-      restoreSummary.restored = Boolean(restored.ok)
-      restoreSummary.failed = restored.failed ?? []
-      restoreSummary.error = restored.error ?? null
-      previewState.lastStageByItem.delete(item.id)
-      if (!restored.ok) debugPush({ stage: '预览', message: `节点开关恢复失败：${(restored.failed ?? []).join(',') || restored.error || '未知原因'}` })
+    const stageFailed = stageResults.filter((entry) => !entry.ok).map((entry) => entry.index)
+    const restore = { restored: Boolean(restoreResult.ok), failed: restoreResult.failed ?? [], error: restoreResult.error ?? null }
+    if (captureError) {
+      return { ok: false, stage, itemId: item.id, reasons: ['capture_failed'], error: `${captureError.message}${restore.restored ? '' : `；节点开关未完全恢复（节点 ${restore.failed.join(', ')}）`}`, stageFailed, restore, frameCaptured: false }
     }
+    const merged = {
+      ok: stageFailed.length === 0 && restore.restored,
+      stage,
+      itemId: item.id,
+      itemName: info.name,
+      dataUrl: frame?.dataUrl,
+      path: frame?.path,
+      nodes: nodes.length,
+      stageFailed,
+      restore,
+      reasons: [...(stageFailed.length ? ['stage_write_failed'] : []), ...(restore.restored ? [] : ['restore_failed'])],
+      stages: nodes.reduce((acc, node) => { acc[node.layer] = (acc[node.layer] ?? 0) + 1; return acc }, {}),
+    }
+    if (!merged.ok) {
+      merged.error = stageFailed.length
+        ? `切换节点开关失败：节点 ${stageFailed.join(', ')}${restore.restored ? '' : `；恢复也失败：节点 ${restore.failed.join(', ')}`}`
+        : `预览已抓帧，但节点开关未完全恢复（节点 ${restore.failed.join(', ')}），请手动检查`
+    }
+    return merged
   }
-  if (captureError) {
-    const error = new Error(`${captureError.message}${restoreSummary.restored ? '' : `；且节点开关未完全恢复（节点 ${restoreSummary.failed.join(', ')}）`}`)
-    error.restore = restoreSummary
-    throw error
-  }
-  if (!restoreSummary.restored) {
-    return { ok: false, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, error: `预览已抓帧，但节点开关未完全恢复（节点 ${restoreSummary.failed.join(', ')}），请手动检查`, restore: restoreSummary }
-  }
-  return { ok: true, stage, itemId: item.id, itemName: info.name, dataUrl: frame.dataUrl, path: frame.path, nodes: nodes.length, restore: restoreSummary, stages: nodes.reduce((acc, node) => { acc[node.layer] = (acc[node.layer] ?? 0) + 1; return acc }, {}) }
+  return layered ? withPreviewLock(item.id, run) : run()
 }
 
-/** 分屏对比：左右各一个 stage，一次返回两张图。 */
+/** 分屏对比：两侧都拿到有效图像才算成功；左侧失败则立即停止。 */
 async function opPreviewCompare(ctx, args, signal) {
   const left = ['source', 'L1', 'L2', 'L3', 'current'].includes(args.left) ? args.left : 'source'
   const right = ['source', 'L1', 'L2', 'L3', 'current'].includes(args.right) ? args.right : 'L3'
   const width = Number(args.width) || 560
   const leftFrame = await opPreviewLive(ctx, { ...args, stage: left, width }, signal)
+  if (!leftFrame?.ok || !leftFrame?.dataUrl) {
+    return { ok: false, width, failedSide: 'left', left: { stage: left, ok: false, error: leftFrame?.error ?? '没有拿到图像', reason: leftFrame?.reason ?? null, restore: leftFrame?.restore ?? null }, right: null }
+  }
+  if (leftFrame.restore && leftFrame.restore.restored === false) {
+    return { ok: false, width, failedSide: 'left', left: { stage: left, ok: false, error: `左侧恢复失败（节点 ${(leftFrame.restore.failed ?? []).join(', ')}），已停止右侧预览`, restore: leftFrame.restore }, right: null }
+  }
   const rightFrame = await opPreviewLive(ctx, { ...args, stage: right, width }, signal)
+  if (!rightFrame?.ok || !rightFrame?.dataUrl) {
+    return { ok: false, width, failedSide: 'right', left: { stage: left, dataUrl: leftFrame.dataUrl }, right: { stage: right, ok: false, error: rightFrame?.error ?? '没有拿到图像', reason: rightFrame?.reason ?? null, restore: rightFrame?.restore ?? null } }
+  }
   return { ok: true, width, left: { stage: left, dataUrl: leftFrame.dataUrl }, right: { stage: right, dataUrl: rightFrame.dataUrl } }
 }
 
+/** 分屏对比：左右各一个 stage，一次返回两张图。 */
 /** LUT 自动补齐：先查已安装；没有就按内置生成 / 按 URL 下载 / 明确报告缺失。 */
 /**
  * LUT 获取与套用：识别到需要 LUT 但机内没有匹配时，

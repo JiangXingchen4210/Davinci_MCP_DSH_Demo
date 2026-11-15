@@ -1,5 +1,14 @@
 # CHANGELOG
 
+## 0.11.8 — 预览状态安全（Host 集成回归）· 本地版
+
+- **节点写入按真实契约解析**：`parseNodeWriteResult` 支持布尔与 `{success}`；恢复返回 `false` 不再算成功
+- **切换/抓帧/恢复统一组装**：不再在 try 内提前 return，`stageFailed` 与 `restore.failed` 都会到达调用方；两者都失败时 `ok:false`
+- **重叠预览串行化**：同一片段从「定位→读原状态→切层→抓帧→恢复」整段加锁；交错请求不会再互改节点状态
+- **读图失败不当成功**：`readLayeredNodes` 返回 `{ok, nodes, error}`；分层预览读图失败返回 `probe_failed`；`preview.compare` 校验两侧 ok/dataUrl，左恢复失败立即停止右侧
+- **轨道读取错误保留**：`videoTrackCount`/`listVideoItemsSafe` 不再把失败当 0 条；`findItemAcrossTracks` 只有完整扫描后才报"找不到"
+- 新增 **Host 集成测试** `test/host_integration.test.mjs`：从 `index.js apply(ctx)` 取面板工具，fake MCP 记录调用并模拟节点开关/抓帧；覆盖恢复返回 false、切换+恢复均失败、重叠预览锁、读图失败、分屏失败、轨数/单轨读取失败、V5 定位
+
 ## 0.11.7 — 预览状态安全 + 交付停止/回滚/比较规则 + 跨轨定位
 
 - **分层预览改变原节点状态**：新增 `lib/preview_state.mjs`（normalizeNodes/planStageEnabled/planRestore/summarizeRestore）；节点状态未知时**零次写节点**并返回可解释错误；恢复按原始开关逐条写回；恢复失败在结果里给出节点编号
