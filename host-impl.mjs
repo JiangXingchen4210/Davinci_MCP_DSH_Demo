@@ -77,6 +77,14 @@ function run(command, args, options = {}) {
 }
 
 /** 解析可执行文件绝对路径（宿主进程 PATH 可能与 shell 不同）。 */
+/** MCP 工具的业务成功：只认 true 或 {success:true}；布尔 false 与 {success:false} 都算失败。 */
+function toolOk(value) {
+  if (value === true) return true
+  if (value === false) return false
+  if (value && typeof value === 'object' && typeof value.success === 'boolean') return value.success
+  return false
+}
+
 function whichTool(bin) {
   return new Promise((resolve) => {
     execFile('/usr/bin/env', ['which', bin], { timeout: 5000 }, (error, stdout) => resolve(error ? null : (String(stdout).trim() || null)))
@@ -1319,7 +1327,7 @@ async function opScenesScan(ctx, args, signal) {
     }
     const { intersectShotWithSource } = await importFresh('lib/source_range.mjs')
     const sourceStart = Number.isFinite(info.sourceStartFrame) ? info.sourceStartFrame : 0
-    const sourceEnd = Number.isFinite(info.sourceEndFrame) ? info.sourceEndFrame : sourceStart + Math.max(1, Math.round((Number(info.durationFrames) || 0)))
+    const sourceEnd = Number.isFinite(info.sourceEndFrame) ? info.sourceEndFrame : sourceStart + Math.max(1, Math.round(Number(info.duration) || 0))
     for (const shot of scan.shots ?? []) {
       // 交给纯函数做交集：镜头按整段源素材扫描，但只能用时间线片段实际可用的源区间
       const range = intersectShotWithSource({
@@ -1331,6 +1339,31 @@ async function opScenesScan(ctx, args, signal) {
         recordStart: info.recordStart,
       })
       if (!range.ok) continue
+      const shotFrameTimes = Array.isArray(shot.frameTimes)
+        ? shot.frameTimes
+        : (shot.frames ?? []).map((frame, index) => (Number.isFinite(Number(frame)) ? Number(frame) : null)).map((value) => value ?? (shot.start + ((shot.end - shot.start) * [0.15, 0.5, 0.85][index])))
+      const keep = []
+      const keepTimes = []
+      for (let index = 0; index < (shot.frames ?? []).length; index += 1) {
+        const time = shotFrameTimes[index]
+        if (!Number.isFinite(Number(time))) continue
+        const seconds = Number(time)
+        if (seconds >= range.inFrame / fps && seconds < range.outFrame / fps) {
+          keep.push(shot.frames[index])
+          keepTimes.push(Number(seconds.toFixed(3)))
+        }
+      }
+      // 镜头被时间线入出点裁过后，指标必须按交集区间重算（不能沿用整段源素材的统计）
+      let metrics = shot.metrics ?? null
+      if (range.clippedHeadFrames || range.clippedTailFrames) {
+        try {
+          const remeasured = JSON.parse(await run(process.execPath, [
+            path.join(HERE, 'lib', 'scenes.mjs'), 'metrics', info.filePath,
+            String((range.inFrame / fps).toFixed(3)), String((range.outFrame / fps).toFixed(3)), '--json',
+          ], { timeoutMs: 120_000 }))
+          metrics = remeasured.metrics ?? metrics
+        } catch { /* 保留原指标，但下面会标注 */ }
+      }
       scenes.push({
         index: sceneIndex++,
         itemId: info.itemId,
@@ -1346,11 +1379,10 @@ async function opScenesScan(ctx, args, signal) {
         endSeconds: range.outFrame / fps,
         clippedHeadFrames: range.clippedHeadFrames,
         clippedTailFrames: range.clippedTailFrames,
-        frames: (shot.frames ?? []).filter((frame) => {
-          const frameNo = Math.round(Number(frame) * fps)
-          return Number.isFinite(frameNo) ? frameNo >= range.inFrame && frameNo < range.outFrame : true
-        }),
-        metrics: shot.metrics ?? null,
+        frames: keep,
+        frameTimes: keepTimes,
+        metrics,
+        metricsRemeasured: Boolean(range.clippedHeadFrames || range.clippedTailFrames),
       })
     }
   }
@@ -3890,7 +3922,14 @@ async function opStyleOneClick(ctx, args, signal) {
     if (style.filmLut) {
       const staged = await settle(callTool(ctx, 'lut', { action: 'install', name: `style-${style.key}`, source_path: style.filmLut, overwrite: true }, signal))
       if (staged.ok) {
-        filmLut = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: built?.drxNodes?.lookNodeIndex ?? 14, lut_path: staged.value?.set_lut_path ?? style.filmLut, source: 'item', ...scopeOf(itemId) }, signal))
+        const mounted = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: built?.drxNodes?.lookNodeIndex ?? 14, lut_path: staged.value?.set_lut_path ?? style.filmLut, source: 'item', ...scopeOf(itemId) }, signal))
+        const mountedOk = Boolean(mounted.ok && toolOk(mounted.value))
+        // 读回风格节点，区分“安装成功 / 挂载成功 / 画面已验证”
+        const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(itemId) }, signal))
+        const lookIndex = built?.drxNodes?.lookNodeIndex ?? 14
+        const lookNode = (probe.ok ? probe.value?.nodes ?? [] : []).find((node) => Number(node.node_index) === lookIndex) ?? null
+        filmLut = { ok: mountedOk, mountedLut: lookNode?.lut ?? null, readback: Boolean(lookNode?.lut), frameVerified: false, error: mountedOk ? null : 'Resolve 拒绝挂载 Film LUT（set_lut 返回 false）' }
+        debugPush({ stage: '风格', message: `Film LUT 挂载：applied=${mountedOk} 读回=${lookNode?.lut ?? '无'}` })
       }
     }
     // ④ 可选：柔光（只有风格需要才加）
@@ -4630,15 +4669,31 @@ async function opRestoreResolve(ctx, args, signal) {
   const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
 
   // 1) 明确的曲线/元数据优先：LogC4 与 LogC3 是两条曲线，不能因为同品牌就互相顶替
-  const meta = await settle(callTool(ctx, 'media_pool_item', { action: 'get_metadata', clip_id: info.mediaPoolItemId ?? item.id }, signal)).catch(() => null)
+  const clipId = info.clipId ?? item.id
+  const meta = await settle(callTool(ctx, 'media_pool_item', { action: 'get_metadata', clip_id: clipId }, signal)).catch(() => null)
+  const clipProps = await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: clipId } }, signal)).catch(() => null)
   const probe = await ffprobeJson(info.filePath).catch(() => null)
-  const metaText = [JSON.stringify(probe?.format?.tags ?? {}), JSON.stringify(probe?.streams?.[0]?.tags ?? {}), JSON.stringify(meta?.value ?? {}), info.name].join(' ')
+  const projectSettings = await settle(callTool(ctx, 'project_settings', { action: 'get_setting' }, signal)).catch(() => null)
+  const projectValues = projectSettings?.ok ? (projectSettings.value?.settings ?? projectSettings.value ?? {}) : {}
+  const metaText = [
+    JSON.stringify(probe?.format?.tags ?? {}),
+    JSON.stringify(probe?.streams?.[0]?.tags ?? {}),
+    JSON.stringify(meta?.value ?? {}),
+    JSON.stringify(clipProps?.value?.properties ?? {}),
+    JSON.stringify({ input: projectValues.colorSpaceInput, timeline: projectValues.colorSpaceTimeline, output: projectValues.colorSpaceOutput, mode: projectValues.colorScienceMode }),
+    info.name,
+  ].join(' ')
   const curve = detectCurveFromMeta(metaText)
-  debugPush({ stage: '还原', message: curve ? `机型/曲线：${curve.vendor} ${curve.model} → ${curve.curve}（来自元数据/显式曲线，matchedBy=${curve.matchedBy}）` : '元数据里没有识别出机型/曲线，无法匹配官方 LUT' })
+  debugPush({ stage: '还原', message: curve ? `机型/曲线：${curve.vendor} ${curve.model} → ${curve.curve}（matchedBy=${curve.matchedBy}）` : '元数据里没有识别出机型/曲线，无法匹配官方 LUT' })
+  if (curve?.needsCurveConfirmation) {
+    const luts = await listLutLibrary()
+    const { matchCurveLut } = await importFresh('lib/restore.mjs')
+    const candidates = matchCurveLut(luts, curve).candidates.slice(0, 6)
+    return { ok: false, needsRestore: true, needsCurveConfirmation: true, verdict: null, camera: { vendor: curve.vendor, model: curve.model }, curve: null, candidateCurve: curve.curve, candidates, needsUserInput: true, message: `只识别到机型（${curve.vendor} ${curve.model}），无法确认是 ${curve.curve} 还是其它编码：请提供曲线/色域或直接选 LUT` }
+  }
 
   // 2) 项目色彩管理已接管输入变换 → 不再挂第二次技术 LUT
-  const settingsRaw = await settle(callTool(ctx, 'project_settings', { action: 'get_setting' }, signal)).catch(() => null)
-  const settings = settingsRaw?.ok ? (settingsRaw.value?.settings ?? settingsRaw.value ?? {}) : {}
+  const settings = projectValues
   const rcm = rcmManaged(settings)
   if (curve && rcm.managed) {
     debugPush({ stage: '还原', message: `跳过技术 LUT：${rcm.reason}` })
@@ -4764,8 +4819,14 @@ async function opRestoreApply(ctx, args, signal) {
   const staged = await settle(callTool(ctx, 'lut', { action: 'install', name: `restore-${stamp()}`, source_path: lutPath, overwrite: true }, signal))
   if (!staged.ok) return { ok: false, error: messageOf(staged.error) }
   const applied = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: 1, lut_path: staged.value?.set_lut_path ?? lutPath, source: 'item', ...scopeOf(item.id) }, signal))
-  debugPush({ stage: '还原', message: `已套用还原 LUT：${path.basename(lutPath)}（1 号节点）` })
-  return { ok: Boolean(applied.ok), lutPath, staged: staged.value ?? null }
+  const appliedOk = Boolean(applied.ok && toolOk(applied.value))
+  // 读回节点 1 的 LUT，确认真的挂上了（不能只看调用没抛错）
+  const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
+  const node1 = (probe.ok ? probe.value?.nodes ?? [] : []).find((node) => Number(node.node_index) === 1) ?? null
+  const mountedLut = node1?.lut ?? null
+  const readbackOk = Boolean(mountedLut && String(mountedLut).toLowerCase().includes(String(path.basename(lutPath)).replace(/\.cube$/i, '').toLowerCase().split('-').pop()))
+  debugPush({ stage: '还原', message: `还原 LUT 套用结果：applied=${appliedOk} 读回=${mountedLut ?? '无'}` })
+  return { ok: appliedOk, applied: appliedOk, lutPath, mountedLut, readbackOk, staged: staged.value ?? null, error: appliedOk ? null : 'Resolve 拒绝挂载 LUT（set_lut 返回 false）' }
 }
 
 async function findBuiltinRestoreLut(cameraKey) {
