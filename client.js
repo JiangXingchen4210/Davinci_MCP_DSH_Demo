@@ -1968,7 +1968,10 @@ window.__ModuleLoader__.load({
         h('div', { style: S.hint }, t('style.hint')),
         h('div', { style: S.buttons },
           styleList.map((style) => h(Button, { key: style.key, onClick: () => applyStyleOneClick(style.key), disabled: working || !itemId }, style.label))),
-        styleResult ? h('div', { style: S.hint }, `已应用：${styleResult.style?.label ?? ''} · ${styleResult.applied}/${styleResult.total}`) : null,
+        styleResult ? h(React.Fragment, null,
+            h('div', { style: S.hint }, `已应用：${styleResult.style?.label ?? ''} · ${styleResult.applied}/${styleResult.total}`),
+            styleEffectsLine(styleResult),
+          ) : null,
       )
 
       const deliveryCard = h(
@@ -2666,6 +2669,19 @@ window.__ModuleLoader__.load({
           : null,
       )
 
+      function styleEffectsLine(value) {
+        const effects = value?.effects
+        if (!effects) return null
+        const names = { grain: '颗粒', vignette: '暗角', filmLut: 'Film LUT', mist: '柔光' }
+        const unsupported = (effects.unsupported ?? []).map((item) => names[item.name] ?? item.name)
+        const missing = (effects.missing ?? []).map((item) => names[item] ?? item)
+        const parts = []
+        if (missing.length) parts.push(`必需效果未完成：${missing.join('、')}`)
+        if (unsupported.length) parts.push(`本版未实现：${unsupported.join('、')}（需 Fusion/后期）`)
+        if (!parts.length) parts.push('影调与必需效果均已应用')
+        return h('div', { style: S.hint }, `成片完成度：${parts.join('；')}`)
+      }
+
       const styleCard = h(
         Card,
         { title: t('style.title') },
@@ -2686,6 +2702,7 @@ window.__ModuleLoader__.load({
             ? h('div', { style: S.error }, styleResult.error)
             : h('div', null,
                 h('div', { style: S.hint }, `${styleResult.preset} · ${styleResult.ok}/${styleResult.total} 个片段已套用`),
+                styleEffectsLine(styleResult),
                 h('div', { style: S.hint }, t('style.allHint')),
               )
           : null,

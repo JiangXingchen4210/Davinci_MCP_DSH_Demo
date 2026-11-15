@@ -3084,15 +3084,9 @@ async function opStoryPlan(ctx, args, signal) {
     if (args.withMotion !== false) {
       try {
         const curve = await analyseClipMotion(info.filePath, { startSec, durationSec, fps: args.motionFps ?? 6 })
-        // 曲线时间加回区间偏移（与台词同一坐标系：源素材秒）
-        const offset = startSec
-        motionByClip[cacheKey] = {
-          ...curve,
-          samples: curve.samples.map((sample) => ({ t: Number((sample.t + offset).toFixed(3)), energy: sample.energy })),
-          valleys: curve.valleys.map((time) => Number((time + offset).toFixed(3))),
-          peaks: curve.peaks.map((time) => Number((time + offset).toFixed(3))),
-          stills: curve.stills.map((still) => ({ start: Number((still.start + offset).toFixed(3)), end: Number((still.end + offset).toFixed(3)), duration: still.duration })),
-        }
+        // 统一坐标系：motion 保持「镜头内相对秒」（story.plan 的 placeUnit 用相对秒找切点），
+        // 不能在曲线时间上加源偏移——否则同一段表演在源文件里挪 40 秒就会切到不同位置。
+        motionByClip[cacheKey] = curve
         motionStats.push({ name: info.name, stills: curve.stills.length, samples: curve.samples.length, meanEnergy: curve.mean })
       } catch (error) {
         motionStats.push({ name: info.name, error: messageOf(error) })
