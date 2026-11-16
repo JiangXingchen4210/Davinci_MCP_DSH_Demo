@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.11.21 — 客户端面板不显示的根因修复
+
+- 根因：`client.js` 里客户端模块 id 写成 `@local/davinci-console`，而 DSH `client-modules` 按**包名**匹配 loader 条目；包名是 `davinci-console-demo` → 客户端半边从未进入 web 插件表（host 正常、main/sidebar 无注册）
+- 修复：客户端模块 id 改为 `davinci-console-demo`；本地 profile 依赖也从 `@local/davinci-console` 改回真实包名（`link:` 指向源码），与 npm 安装路径一致
+- 测试：`client_order.test.mjs` 断言客户端 id 必须等于包名
+- 调试：新增 `debug.clientGraph` / `debug.clientFlush` / `debug.clientBundle`（host 工具可查 web 插件表）
+
 ## 0.11.20 — Connection 准入 + icon 元信息修复
 
 - **安全**：面板 `/davinci-panel/action` 与 `/davinci-panel/media` 接入 DSH `ctx.connection.requestRejection()`；未认证 → 401、来源不信任 → 403、认证服务不可用 → 503（fail closed，不再只靠回环地址与固定请求头）

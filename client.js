@@ -7,7 +7,7 @@
  */
 
 window.__ModuleLoader__.load({
-  id: '@local/davinci-console',
+  id: 'davinci-console-demo',
   factory(require) {
     const React = require('react')
     const h = React.createElement

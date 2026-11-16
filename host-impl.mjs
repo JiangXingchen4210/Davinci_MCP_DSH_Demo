@@ -4419,6 +4419,44 @@ async function withPreviewLock(fn) {
 }
 
 /** 预览能力：区分「能安全分层预览」与「只能看 current/source」。 */
+async function opDebugClientBundle(ctx, args) {
+  try {
+    const service = ctx.clientModules
+    if (!service?.fetchBundle) return { ok: false, stage: 'service', error: 'fetchBundle unavailable' }
+    const path = service.clientPath ? service.clientPath('@local/davinci-console') : null
+    const target = path ?? 'plugins/??@local/davinci-console/client.js'
+    const url = 'http://127.0.0.1/' + String(target).replace(/^\/+/, '')
+    const response = await service.fetchBundle(new Request(url))
+    const text = await response.text()
+    return { ok: response.ok, stage: 'done', status: response.status, path: String(path ?? ''), bytes: text.length }
+  } catch (error) {
+    return { ok: false, stage: 'catch', error: String(messageOf(error)).slice(0, 300) }
+  }
+}
+
+async function opDebugClientFlush(ctx, args) {
+  const service = ctx.clientModules
+  if (!service?.flush) return { ok: false, error: 'flush 不可用' }
+  const errors = []
+  try {
+    const dirty = Array.from(service.dirty ?? [])
+    await service.flush((error) => errors.push(String(messageOf(error)).slice(0, 500)))
+    const ids = (service.graph?.()?.entries ?? []).map((entry) => entry.id)
+    return { ok: true, dirty, errors, count: ids.length, hasOurs: ids.includes('@local/davinci-console'), ids: ids.slice(-10) }
+  } catch (error) {
+    return { ok: false, error: String(messageOf(error)).slice(0, 500), errors }
+  }
+}
+
+async function opDebugClientGraph(ctx, args) {
+  const service = ctx.clientModules
+  if (!service) return { ok: false, error: 'ctx.clientModules 不可用（inject 缺失或非 web 宿主）' }
+  const graph = service.graph ? service.graph() : null
+  const ids = Array.isArray(graph?.modules) ? graph.modules.map((item) => item.id ?? item.name) : null
+  const hasOurs = ids ? ids.includes('@local/davinci-console') : null
+  return { ok: true, ids, hasOurs, clientPath: service.clientPath ? service.clientPath('@local/davinci-console') ?? null : null, graph }
+}
+
 async function opPreviewCapabilities(ctx, args, signal) {
   const { item } = await resolveItemContext(ctx, signal, args.itemId)
   const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
@@ -5632,6 +5670,9 @@ const OPS = {
   'deps.check': opDepsCheck,
   'feedback.issue': opFeedbackIssue,
   'debug.log': opDebugLog,
+  'debug.clientGraph': opDebugClientGraph,
+  'debug.clientBundle': opDebugClientBundle,
+  'debug.clientFlush': opDebugClientFlush,
   'debug.clear': opDebugClear,
   'ops.list': opOpsList,
 }
