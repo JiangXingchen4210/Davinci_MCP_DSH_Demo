@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.11.22 — bundle patch 仍指向旧别名（面板/宿主都不加载）
+
+- 根因：`cordis.patch.yml` 的插入行仍写 `name: '@local/davinci-console'`；profile 改回真实包名后该模块名解析不到 → 宿主插件不挂载、客户端自然也没有
+- 修复：patch 行改为 `name: 'davinci-console-demo'`（跨本地 link 与 npm 安装都成立）
+- 无功能变更
+
 ## 0.11.21 — 客户端面板不显示的根因修复
 
 - 根因：`client.js` 里客户端模块 id 写成 `@local/davinci-console`，而 DSH `client-modules` 按**包名**匹配 loader 条目；包名是 `davinci-console-demo` → 客户端半边从未进入 web 插件表（host 正常、main/sidebar 无注册）

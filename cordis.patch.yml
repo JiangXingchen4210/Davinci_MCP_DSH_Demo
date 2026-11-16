@@ -3,4 +3,4 @@
 # 渲染侧边栏入口与中央面板（id 均为 davinci）。
 - insert:
     - id: davinci-console
-      name: '@local/davinci-console'
+      name: 'davinci-console-demo'
