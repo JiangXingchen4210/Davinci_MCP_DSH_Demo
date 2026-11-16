@@ -43,8 +43,18 @@
       },
       "versions": [
         {
+          "version": "0.11.20",
+          "publishTimestamp": 1794832181,
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          },
+          "source": {
+            "type": "npm"
+          }
+        },
+        {
           "version": "0.11.19",
-          "publishTimestamp": 1794782280,
+          "publishTimestamp": 1794828581,
           "engines": {
             "dsh": ">=0.2.2-rc.1"
           },
@@ -54,7 +64,7 @@
         },
         {
           "version": "0.11.7",
-          "publishTimestamp": 1794778680,
+          "publishTimestamp": 1794824981,
           "engines": {
             "dsh": ">=0.2.2-rc.1"
           },
@@ -64,7 +74,7 @@
         },
         {
           "version": "0.11.6",
-          "publishTimestamp": 1794775080,
+          "publishTimestamp": 1794821381,
           "engines": {
             "dsh": ">=0.2.2-rc.1"
           },
@@ -74,17 +84,7 @@
         },
         {
           "version": "0.11.5",
-          "publishTimestamp": 1794771480,
-          "engines": {
-            "dsh": ">=0.2.2-rc.1"
-          },
-          "source": {
-            "type": "npm"
-          }
-        },
-        {
-          "version": "0.11.4",
-          "publishTimestamp": 1794767880,
+          "publishTimestamp": 1794817781,
           "engines": {
             "dsh": ">=0.2.2-rc.1"
           },
