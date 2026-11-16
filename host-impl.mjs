@@ -5644,6 +5644,13 @@ async function runOp(ctx, op, args, signal) {
 
 function createRoute(ctx) {
   return async (request, response) => {
+    // 先过 DSH Connection 准入：认证不可用/未认证一律拒绝（不要只靠回环地址）
+    const { admissionStatus, admissionMessage } = await importFresh('lib/route_auth.mjs')
+    const admission = admissionStatus(ctx.connection, request.headers)
+    if (admission) {
+      sendJson(response, admission, { ok: false, error: { message: admissionMessage(admission) } })
+      return
+    }
     if (!isLoopback(request)) {
       sendJson(response, 403, { ok: false, error: { message: '只接受本机请求' } })
       return
@@ -5688,7 +5695,7 @@ function createRoute(ctx) {
  * 内嵌预览的媒体路由：GET /davinci-panel/media?path=…
  * 只允许 DATA_DIR 下几个子目录（防止任意文件读取），支持 Range（<video> 拖动进度条要用）。
  */
-function createMediaRoute() {
+function createMediaRoute(ctx) {
   const allowedRoots = ['previews', 'frames', 'overlays', 'clean', 'thumbs'].map((sub) => path.join(DATA_DIR, sub))
   return async (request, response) => {
     if (!isLoopback(request)) {
@@ -5800,7 +5807,7 @@ export function apply(ctx) {
     'resolve-console: action route',
   )
   ctx.effect(
-    () => ctx.webServer.register({ kind: 'exact', path: MEDIA_PATH, handler: createMediaRoute() }),
+    () => ctx.webServer.register({ kind: 'exact', path: MEDIA_PATH, handler: createMediaRoute(ctx) }),
     'resolve-console: media route',
   )
   ctx.effect(() => ctx.tools.register(panelTool(ctx)), 'resolve-console: panel tool')

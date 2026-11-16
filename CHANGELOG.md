@@ -1,10 +1,11 @@
 # CHANGELOG
 
-## 0.11.20 — 本地 link 安装的 icon 元信息修复
+## 0.11.20 — Connection 准入 + icon 元信息修复
 
-- 根因：`package.json` 通过 `exports["./icon"]` 暴露图标；本地以 `@local/davinci-console` 软链安装时，DSH 用真实路径校验图标归属包名，包名（davinci-console-demo）与 link 名不一致 → `icon must remain inside its package directory`
-- 修复：移除 `exports["./icon"]`，改用顶层 `"icon": "icon.svg"`（DSH 走 manifest 相对路径校验，本地 link 与 npm 安装都成立）
-- 无功能变更
+- **安全**：面板 `/davinci-panel/action` 与 `/davinci-panel/media` 接入 DSH `ctx.connection.requestRejection()`；未认证 → 401、来源不信任 → 403、认证服务不可用 → 503（fail closed，不再只靠回环地址与固定请求头）
+- 新增 `lib/route_auth.mjs`（admissionStatus/admissionMessage）与 `route_auth.test.mjs`；实测无凭据 POST = 401，无凭据媒体 = 403
+- `index.js` inject 增加 `connection`
+- **icon 元信息**：移除 `exports["./icon"]`，改用顶层 `"icon": "icon.svg"`，修复 `@local` 软链安装时 DSH 报 `icon must remain inside its package directory`
 
 ## 0.11.19 — 剧情坐标 / 肤色选区 / 风格完成度 / Vision 测试降级（正式版）
 
