@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.11.23 — 真实工程验收修复：drx 不稳定 / 风格错误可见性
+
+- **高级 MCP（drx）连接加固**：`callDrx` 改为 4 次重试（1/3/6s 退避）；配方逐节点读回校验遇到 drx 不可用时**跳过剩余读回但不拖垮建图**；`style.oneClick` 先探活 drx，不可用则在改动还原/项目状态前中止并给出可执行提示
+- **错误可见性**：`style.oneClick` 结果暴露 `gradeError` / `gradeStage` / `filmLutError`，面板能显示具体缺项而不是只有 `applied:0`
+- **饱和度读回校验**：0–100 参数与 drx 解析器 0–1 归一化统一比较（此前误报未通过）
+- 真机验收（Ronin-DIT 3 个片段，Kodak 2383 + DJI X7 还原 LUT）：还原 3/3、15 节点建图 3/3、Film LUT 3/3，`effects.requiredApplied=true`；颗粒按 unsupported 如实报告
+
 ## 0.11.22 — bundle patch 仍指向旧别名（面板/宿主都不加载）
 
 - 根因：`cordis.patch.yml` 的插入行仍写 `name: '@local/davinci-console'`；profile 改回真实包名后该模块名解析不到 → 宿主插件不挂载、客户端自然也没有

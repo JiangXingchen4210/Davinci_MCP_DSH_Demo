@@ -85,6 +85,22 @@ function toolOk(value) {
   return false
 }
 
+/** 高级 MCP（drx）调用：连接丢失时重试一次，并给出可执行的修复提示。 */
+async function callDrx(ctx, payload, signal) {
+  let last = null
+  const delays = [1000, 3000, 6000]
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const result = await settle(callTool(ctx, 'drx', payload, signal))
+    if (result.ok) return result
+    last = result
+    const text = String(messageOf(result.error) ?? '')
+    if (!/not connected|ENOENT|tool .* not found|connection/i.test(text)) break
+    if (attempt < delays.length) await new Promise((resolve) => setTimeout(resolve, delays[attempt]))
+  }
+  const text = String(messageOf(last?.error) ?? '未知错误')
+  throw new Error(`高级 MCP（drx）不可用：${text}；请在 DSH 的插件/连接页重载 davinci-resolve-advanced MCP 后重试`)
+}
+
 function whichTool(bin) {
   return new Promise((resolve) => {
     execFile('/usr/bin/env', ['which', bin], { timeout: 5000 }, (error, stdout) => resolve(error ? null : (String(stdout).trim() || null)))
@@ -3877,6 +3893,14 @@ async function opStyleOneClick(ctx, args, signal) {
   const { findStyle } = await importFresh('lib/stylelib.mjs')
   const { planStyleEffects, summarizeStyleEffects } = await importFresh('lib/style_effects.mjs')
   const style = findStyle(String(args.preset ?? ''))
+  // 预检高级 MCP（drx）：不可用时不要先改还原/项目状态。
+  // 用一次「解析不存在的坐标文件」探活：业务错误说明工具可达，只有连接类错误才算不可用。
+  {
+    const probe = await settle(callTool(ctx, 'drx', { action: 'parse', drxPath: path.join(os.tmpdir(), '__drx_probe__.drx') }, signal))
+    if (!probe.ok && /not connected|connection|ENOENT.*tool|tool .*not found/i.test(String(messageOf(probe.error)))) {
+      return { ok: false, blocked: true, style: { key: style.key, label: style.label }, error: `高级 MCP（drx）未连接：${messageOf(probe.error)}；请在 DSH 插件/连接页重载 davinci-resolve-advanced MCP 后重试` }
+    }
+  }
   if (!style) throw new Error('未知风格；先调 style.catalog 看列表')
   const structure = await settle(callTool(ctx, 'timeline', { action: 'probe_timeline_structure', track_types: ['video'] }, signal))
   const items = []
@@ -3933,7 +3957,7 @@ async function opStyleOneClick(ctx, args, signal) {
       filmLut: style.filmLut ? Boolean(filmLut?.ok) : undefined,
       mist: style.mist ? Boolean(mist?.ok) : undefined,
     })
-    results.push({ itemId, restore: Boolean(restore?.ok), restoreLut: restore?.lutPath ? path.basename(String(restore.lutPath)) : null, restoreError: restore?.error ?? null, grade: Boolean(built?.ok), nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: style.filmLut ? Boolean(filmLut?.ok) : null, mist: mist ? Boolean(mist.ok) : null, effects })
+    results.push({ itemId, restore: Boolean(restore?.ok), restoreLut: restore?.lutPath ? path.basename(String(restore.lutPath)) : null, restoreError: restore?.error ?? null, grade: Boolean(built?.ok), gradeError: built?.error ?? null, gradeStage: built?.stage ?? null, nodes: built?.nodeGraph?.num_nodes ?? null, filmLut: style.filmLut ? Boolean(filmLut?.ok) : null, filmLutError: filmLut?.error ?? null, mist: mist ? Boolean(mist.ok) : null, effects })
   }
   debugPush({ stage: '风格', message: `风格「${style.label}」完成：${results.filter((item) => item.grade).length}/${results.length} 条（还原：${results.filter((i) => i.restore).length} 条；风格 LUT：${style.filmLut ? '用' : '不用'}；柔光：${style.mist ? style.mist.mode : '不用'}）` })
   const succeeded = results.filter((item) => item.grade && item.restore)
@@ -3944,7 +3968,7 @@ async function opStyleOneClick(ctx, args, signal) {
     ok: results.length > 0 && completed.length === results.length,
     style: { key: style.key, label: style.label, sources: style.sources, techniques: style.techniques },
     applied: completed.length,
-    failed: results.filter((item) => !(item.grade && item.restore && item.effects?.ok)).map((item) => ({ itemId: item.itemId, grade: item.grade, restore: item.restore, restoreError: item.restoreError, missingEffects: item.effects?.missing ?? [] })),
+    failed: results.filter((item) => !(item.grade && item.restore && item.effects?.ok)).map((item) => ({ itemId: item.itemId, grade: item.grade, gradeError: item.gradeError, gradeStage: item.gradeStage, restore: item.restore, restoreError: item.restoreError, filmLutError: item.filmLutError, missingEffects: item.effects?.missing ?? [] })),
     effects: { plan: planStyleEffects(style), unsupported, missing: missingEffects, requiredApplied: completed.length === results.length },
     total: results.length,
     results,
@@ -4238,6 +4262,8 @@ async function opGradeBuild3(ctx, args, signal) {
   // 逐组参数写入后逐个节点「生成→解析读回」，确认没有被相邻节点/默认值覆盖
   let recipeVerification = null
   if (args.recipe && Object.keys(args.recipe).length) {
+    debugPush({ stage: '配方', message: '开始逐节点生成/解析 drx 校验' })
+    try {
     recipeVerification = []
     const fieldsOf = (tool) => ({ contrast: ['contrast', 'lift'], exposure: ['gain'], balance: ['gain'], hue: ['hueShift'], saturation: ['saturation'], splitTone: ['gain'], skinKey: ['gain'], bgKey: ['gain'] }[tool] ?? [])
     for (const node of graph.nodes) {
@@ -4245,7 +4271,15 @@ async function opGradeBuild3(ctx, args, signal) {
       if (!fields.length) continue
       if (node.tool === 'lookLut' || node.tool === 'texture' || node.tool === 'input' || node.tool === 'curve') continue
       const tmp = path.join(await ensureTempDir('drx'), `verify-${node.id}-${stamp()}.drx`)
-      const gen = await settle(callTool(ctx, 'drx', { action: 'generate', gradeParams: node.params, metadata: { label: node.label }, target: 'clip', outputPath: tmp }, signal))
+      let gen = null
+      try {
+        gen = await callDrx(ctx, { action: 'generate', gradeParams: node.params, metadata: { label: node.label }, target: 'clip', outputPath: tmp }, signal)
+      } catch (error) {
+        debugPush({ stage: '配方', message: `高级 MCP 读回校验中断（不影响建图）：${messageOf(error)}` })
+        recipeVerification.push({ node: node.label, tool: node.tool, field: '*', expected: null, actual: null, verified: false, note: '高级 MCP 不稳定，跳过剩余读回校验' })
+        break
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40))
       const parsed = gen.ok ? await settle(callTool(ctx, 'drx', { action: 'parse', drxPath: tmp }, signal)) : null
       const parsedNode = parsed?.ok ? (parsed.value?.nodes?.[0] ?? null) : null
       for (const field of fields) {
@@ -4260,12 +4294,18 @@ async function opGradeBuild3(ctx, args, signal) {
           }
           return JSON.stringify(a) === JSON.stringify(b)
         }
-        const same = actual == null ? false : close(expected, actual)
+        const same = actual == null ? false : (field === 'saturation'
+          ? (Math.abs(expected / 100 - actual) <= 2e-3 || close(expected, actual))
+          : close(expected, actual))
         recipeVerification.push({ node: node.label, tool: node.tool, field, expected, actual, verified: same, note: actual == null ? 'drx 解析器未暴露该字段，无法读回' : null })
       }
     }
     const groups = [...new Set(recipeVerification.map((item) => item.tool))]
     debugPush({ stage: '配方', message: `逐组写入并读回校验：${groups.join('、')}（${recipeVerification.filter((item) => item.verified).length}/${recipeVerification.length} 组生成了可解析的 drx）` })
+    } catch (error) {
+      debugPush({ stage: '配方', message: `配方校验失败：${messageOf(error)}` })
+      return { ok: false, stage: 'recipe-verify', graph, error: messageOf(error) }
+    }
   }
   const TOOL_LABEL = { input: '输入', balance: '白平衡/Gain', exposure: '曝光/Offset', contrast: '对比+黑位', curve: '自定义曲线', hue: '色相偏移', saturation: '饱和度', splitTone: '分离色调（限定器+色轮）', skinKey: '肤色键（HSL 限定器）', bgKey: '背景键（HSL 限定器）', lookLut: '风格 LUT', texture: '质感（记录）' }
   debugPush({ stage: '调色图', message: `开始建 ${graph.nodeCount} 节点三层图（L1 校正/还原 → L2 调色偏移 → L3 遮罩/风格/质感），每节点只放一个工具` })
@@ -4283,8 +4323,8 @@ async function opGradeBuild3(ctx, args, signal) {
   const dir = await ensureTempDir('drx')
   const basePath = path.join(dir, `three-layer-base-${stamp()}.drx`)
   const outPath = path.join(dir, `three-layer-${stamp()}.drx`)
-  await callTool(ctx, 'drx', { action: 'generate', gradeParams: drxNodes.base.params, metadata: { label: drxNodes.base.label }, target: 'clip', outputPath: basePath }, signal)
-  const merged = await settle(callTool(ctx, 'drx', { action: 'merge', basePath, newNodes: drxNodes.newNodes, outputPath: outPath }, signal))
+  await callDrx(ctx, { action: 'generate', gradeParams: drxNodes.base.params, metadata: { label: drxNodes.base.label }, target: 'clip', outputPath: basePath }, signal)
+  const merged = await callDrx(ctx, { action: 'merge', basePath, newNodes: drxNodes.newNodes, outputPath: outPath }, signal)
   if (!merged.ok) return { ok: false, stage: 'merge', graph, error: messageOf(merged.error) }
 
   // 三层分行坐标：merge 写进去的 x/y 会被 ApplyGradeFromDRX 忽略（实测），必须再走一次
@@ -4298,12 +4338,17 @@ async function opGradeBuild3(ctx, args, signal) {
     return [LAYOUT.ROW_X[row] + index * LAYOUT.SPACING_X, LAYOUT.ROW_Y[row]]
   })
   const layoutPath = path.join(dir, `three-layer-layout-${stamp()}.drx`)
-  const laid = await settle(callTool(ctx, 'drx', { action: 'relayout', drxPath: outPath, positions, outPath: layoutPath }, signal))
+  const laid = await callDrx(ctx, { action: 'relayout', drxPath: outPath, positions, outPath: layoutPath }, signal)
   if (!laid.ok) return { ok: false, stage: 'relayout', graph, error: messageOf(laid.error) }
   const applyPath = layoutPath
 
   // 4) 应用（两段确认）
-  const beforeFrame = await captureRenderedFrame(ctx, signal, 'build3-before')
+  let beforeFrame = null
+  try {
+  beforeFrame = await captureRenderedFrame(ctx, signal, 'build3-before')
+  } catch (error) {
+    return { ok: false, stage: 'capture-before', graph, error: messageOf(error) }
+  }
   // 同结构 apply 会保留旧布局 → 先清空再套（MCP 文档明确要求）
   await resetGradeConfirmed(ctx, signal, item.id)
   const applied = await applyDrxConfirmed(ctx, signal, { path: applyPath, source: 'item', require_temp_path: true, ...scopeOf(item.id) })
