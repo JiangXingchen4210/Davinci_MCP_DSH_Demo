@@ -5784,6 +5784,13 @@ function createRoute(ctx) {
 function createMediaRoute(ctx) {
   const allowedRoots = ['previews', 'frames', 'overlays', 'clean', 'thumbs'].map((sub) => path.join(DATA_DIR, sub))
   return async (request, response) => {
+    // 媒体文件同样必须过 Connection 准入（Host/Origin + 已认证 Peer），不能只靠回环地址
+    const { admissionStatus, admissionMessage } = await importFresh('lib/route_auth.mjs')
+    const admission = admissionStatus(ctx.connection, request.headers)
+    if (admission) {
+      sendJson(response, admission, { ok: false, error: { message: admissionMessage(admission) } })
+      return
+    }
     if (!isLoopback(request)) {
       sendJson(response, 403, { ok: false, error: { message: '只接受本机请求' } })
       return

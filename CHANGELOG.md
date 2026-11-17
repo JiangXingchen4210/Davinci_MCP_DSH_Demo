@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.11.24 — 媒体接口补齐 Connection 准入
+
+- 根因：`/davinci-panel/media` 此前只有回环地址 + 目录白名单，缺少 Host/Origin 与已认证 Peer 校验；本机任意进程可读取预览帧（实测无凭据 `HTTP 200`）
+- 修复：媒体路由与 action 路由统一调用 `ctx.connection.requestRejection()`；未认证 401、来源不信任 403、认证服务缺失 503（fail closed）
+- 回归测试：`route_auth.test.mjs` 增加静态接线断言（两条路由都必须调用 `admissionStatus(ctx.connection, …)`）
+- 实测：media/action 无凭据与伪造 cookie 均返回 401
+
 ## 0.11.23 — 真实工程验收修复：drx 不稳定 / 风格错误可见性
 
 - **高级 MCP（drx）连接加固**：`callDrx` 改为 4 次重试（1/3/6s 退避）；配方逐节点读回校验遇到 drx 不可用时**跳过剩余读回但不拖垮建图**；`style.oneClick` 先探活 drx，不可用则在改动还原/项目状态前中止并给出可执行提示
