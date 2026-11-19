@@ -5,9 +5,9 @@
 
 > 基线版本：本机 `davinci-resolve-mcp`（resolve-advanced 0.0.0-dev），摘录时间 2026-11-13。
 > 路径缩写：
-> - `S` = `/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server`
+> - `S` = `$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server`
 > - `V` = `.../resolve-advanced/vendor`
-> - `PY` = `/Users/wupx/Library/Application Support/davinci-resolve-mcp/src/server.py`
+> - `PY` = `$HOME/Library/Application Support/davinci-resolve-mcp/src/server.py`
 
 ## 文件
 
@@ -23,8 +23,8 @@
 ## 如何重新抽取（源码升级后核对）
 
 ```bash
-S="/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server"
-V="/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/vendor"
+S="$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server"
+V="$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced/vendor"
 
 sed -n '44,304p' "$S/tools/drx.mjs"            # 全部 schema
 sed -n '687,987p' "$S/tools/drx.mjs"           # action 分派
@@ -33,13 +33,13 @@ sed -n '550,940p' "$V/drx-codec/drx-generator.js"     # createNode
 sed -n '2660,2985p' "$V/drx-codec/drx-generator.js"   # qualifier + window builders
 sed -n '108,273p' "$V/drx-codec/drx-merger.js"        # mergeNodes + generateMergedDRX
 sed -n '608,880p' "$V/drx-codec/drx-parser.js"        # extractNodes / node.params
-sed -n '30121,30166p' "/Users/wupx/Library/Application Support/davinci-resolve-mcp/src/server.py"
+sed -n '30121,30166p' "$HOME/Library/Application Support/davinci-resolve-mcp/src/server.py"
 ```
 
 ## 一键自检（不需要 Resolve，5 条 curl 级命令）
 
 ```bash
-cd "/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced"
+cd "$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced"
 node -e "try{require('sharp');console.log('sharp OK')}catch{console.log('sharp MISSING')}"
 node -e "console.log('native zstd:', typeof require('zlib').zstdCompressSync)"
 which ffmpeg ffprobe

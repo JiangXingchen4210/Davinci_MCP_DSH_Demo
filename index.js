@@ -9,7 +9,7 @@
 export const name = 'davinci-console'
 
 /** webServer 注册面板路由，tools 让 Host 能调用已配置的 Resolve MCP 工具。 */
-export const inject = ['webServer', 'tools', 'connection', 'clientModules']
+export const inject = ['webServer', 'tools', 'connection']
 
 /**
  * @param ctx - 已注入 webServer 与 tools 的 Host Context。

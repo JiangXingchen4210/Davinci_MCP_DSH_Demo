@@ -84,7 +84,7 @@ Error: {
 
 ```js
 const { drxTool } = await import(
-  '/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server/tools/drx.mjs');
+  '$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server/tools/drx.mjs');
 const call = (action, args) => drxTool.handler({ action, args });
 
 const base = await call('generate', { gradeParams: {

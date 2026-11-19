@@ -3978,6 +3978,12 @@ async function opStyleOneClick(ctx, args, signal) {
 
 /** 交付：两段式——先生成方案；确认时校验项目/时间线、规格落地、令牌一次性。 */
 const DELIVERY_PLANS = new Map()
+const DELIVERY_PLAN_TTL_MS = 10 * 60 * 1000
+function pruneDeliveryPlans(now = Date.now()) {
+  for (const [token, plan] of DELIVERY_PLANS) {
+    if (!plan?.at || now - plan.at > DELIVERY_PLAN_TTL_MS) DELIVERY_PLANS.delete(token)
+  }
+}
 
 async function currentProjectTimeline(ctx, signal) {
   const [project, timeline] = await Promise.all([
@@ -4011,6 +4017,7 @@ async function opRenderDeliver(ctx, args, signal) {
 
   // ---------- 第一段：生成方案（不渲染，不写项目设置） ----------
   if (!args.confirmToken) {
+    pruneDeliveryPlans()
     const preflight = await opPreflightCheck(ctx, {}, signal)
     if (!preflight.ok) {
       return { ok: false, blocked: true, preflight, error: `预检未通过，不能进入交付：${(preflight.blockedReasons ?? []).join('；') || '时间线不可用'}` }
@@ -4034,6 +4041,10 @@ async function opRenderDeliver(ctx, args, signal) {
   const token = String(args.confirmToken)
   const plan = DELIVERY_PLANS.get(token)
   if (!plan) return { ok: false, error: '确认令牌无效或已使用/过期：请重新生成交付方案' }
+  if (!plan.at || Date.now() - plan.at > DELIVERY_PLAN_TTL_MS) {
+    DELIVERY_PLANS.delete(token)
+    return { ok: false, error: '确认令牌已过期（超过 10 分钟）：请重新生成交付方案' }
+  }
   DELIVERY_PLANS.delete(token) // 一次性：先消费，后续任何失败都不允许重放
 
   const nowScope = await currentProjectTimeline(ctx, signal)
@@ -4466,7 +4477,7 @@ async function withPreviewLock(fn) {
 /** 预览能力：区分「能安全分层预览」与「只能看 current/source」。 */
 async function opDebugClientBundle(ctx, args) {
   try {
-    const service = ctx.clientModules
+    const service = safeClientModules(ctx)
     if (!service?.fetchBundle) return { ok: false, stage: 'service', error: 'fetchBundle unavailable' }
     const path = service.clientPath ? service.clientPath('@local/davinci-console') : null
     const target = path ?? 'plugins/??@local/davinci-console/client.js'
@@ -4480,7 +4491,7 @@ async function opDebugClientBundle(ctx, args) {
 }
 
 async function opDebugClientFlush(ctx, args) {
-  const service = ctx.clientModules
+  const service = safeClientModules(ctx)
   if (!service?.flush) return { ok: false, error: 'flush 不可用' }
   const errors = []
   try {
@@ -4493,9 +4504,13 @@ async function opDebugClientFlush(ctx, args) {
   }
 }
 
+function safeClientModules(ctx) {
+  try { return ctx.clientModules ?? null } catch { return null }
+}
+
 async function opDebugClientGraph(ctx, args) {
-  const service = ctx.clientModules
-  if (!service) return { ok: false, error: 'ctx.clientModules 不可用（inject 缺失或非 web 宿主）' }
+  const service = safeClientModules(ctx)
+  if (!service) return { ok: false, error: 'ctx.clientModules 不可用（非 web 宿主或该服务未启用）' }
   const graph = service.graph ? service.graph() : null
   const ids = Array.isArray(graph?.modules) ? graph.modules.map((item) => item.id ?? item.name) : null
   const hasOurs = ids ? ids.includes('@local/davinci-console') : null

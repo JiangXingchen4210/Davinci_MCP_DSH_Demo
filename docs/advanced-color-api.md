@@ -5,7 +5,7 @@
 > 源码 `file:line`，以及**实测验证过**的多层节点图写法与落地/验证链路。
 >
 > 调研基线（本机实测，2026-11-13）：
-> - 高级服务器：`/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/`
+> - 高级服务器：`$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced/`
 >   由 `bin/davinci-resolve-advanced-mcp.mjs` 启动，profile 配置见
 >   `~/.dsh/profiles/web/cordis.patch.yml:60-75`（`serverName: resolve_advanced`，`command: node`）。
 > - 工具在模型侧的名字：`mcp__resolve_advanced__drx`、`mcp__resolve_advanced__drp` 等。
@@ -1236,12 +1236,12 @@ NodeIndex 顺序 1..N；LayerIndex 不存在。
 ## 9. 源码索引（file:line）
 
 根目录缩写：
-- `S` = `/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server`
+- `S` = `$HOME/Library/Application Support/davinci-resolve-mcp/resolve-advanced/server`
 - `G` = `.../resolve-advanced/vendor/drx-codec/drx-generator.js`
 - `P` = `.../resolve-advanced/vendor/drx-codec/drx-parser.js`
 - `M` = `.../resolve-advanced/vendor/drx-codec/drx-merger.js`
 - `RQ` = `.../resolve-advanced/vendor/drx-parameters`
-- `PY` = `/Users/wupx/Library/Application Support/davinci-resolve-mcp/src/server.py`
+- `PY` = `$HOME/Library/Application Support/davinci-resolve-mcp/src/server.py`
 - `CT` = `.../davinci-resolve-mcp/src/utils/confirm_tokens.py`
 
 | 主题 | 位置 |

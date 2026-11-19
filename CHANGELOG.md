@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## 0.11.25 — 自查与纠错
+
+- **文档隐私**：发布包内的 `docs/**` 去掉绝对路径 `/Users/wupx/...`（改为 `$HOME/...`），避免泄露本机用户名
+- **交付令牌生命周期**：`DELIVERY_PLANS` 增加 10 分钟 TTL 与惰性清理；过期令牌明确报“已过期”，不再无限累积
+- **降低宿主依赖**：`index.js` 不再把 `clientModules` 作为必需 inject；`debug.clientGraph/clientBundle/clientFlush` 改为安全访问（非 web 宿主下返回可读错误，不影响插件加载）
+- **回归测试**：Host 集成测试新增媒体路由准入用例（无 connection 服务 → 503；未认证 → 401）
+- 自查结论：action/media 两条路由均接入 Connection 准入；包内无凭据/密钥；版本、npm、桌面归档与市场索引一致
+
 ## 0.11.24 — 媒体接口补齐 Connection 准入
 
 - 根因：`/davinci-panel/media` 此前只有回环地址 + 目录白名单，缺少 Host/Origin 与已认证 Peer 校验；本机任意进程可读取预览帧（实测无凭据 `HTTP 200`）

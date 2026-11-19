@@ -24,7 +24,8 @@ function makeFake(state) {
     .map((name) => ({ name }))
   const ctx = {
     effect(fn) { fn() },
-    webServer: { register() { return () => {} } },
+    connection: state.connection,
+    webServer: { register(route) { if (state.routes) state.routes.set(route.path, route.handler); return () => {} } },
     tools: {
       definitions: () => definitions,
       register(tool) { state.tool = tool },
@@ -97,6 +98,7 @@ async function dispatch(name, payload, state) {
 }
 
 async function setup(state) {
+  state.routes = new Map()
   state.setNodeCalls = []
   state.capturedStates = []
   state.captures = []
@@ -105,7 +107,7 @@ async function setup(state) {
   const { ctx, calls } = makeFake(state)
   await apply(ctx)
   assert(Boolean(state.tool), '插件应注册 davinci_panel 工具')
-  return { calls, tool: state.tool }
+  return { calls, tool: state.tool, state }
 }
 
 const runPreview = (tool, args) => tool.execute({ op: 'preview.live', args }, { signal: undefined })
@@ -242,7 +244,33 @@ await testOverlappingPreviews()
 await testCrossClipPreviewTimecode()
 await testProbeFailure()
 await testCompareFailure()
+async function testMediaRouteAdmission() {
+  const fakeRes = () => {
+    const res = { status: null, body: '', writeHead(status) { this.status = status }, end(body) { this.body = body ?? '' } }
+    return res
+  }
+  const fakeReq = (path) => ({ method: 'GET', url: path, headers: {}, socket: { remoteAddress: '127.0.0.1' } })
+
+  // 认证服务缺失 → 503（fail closed），不能因为回环就放行
+  const s1 = { nodes: [], tracks: {} }
+  const { tool: tool1, state: st1 } = await setup(s1)
+  const handler1 = st1.routes.get('/davinci-panel/media')
+  assert(typeof handler1 === 'function', '应注册媒体路由')
+  const res1 = fakeRes()
+  await handler1(fakeReq('/davinci-panel/media?path=/tmp/whatever.jpg'), res1)
+  assert(res1.status === 503, `无 connection 服务时媒体路由必须 503，实际 ${res1.status}`)
+
+  // 未认证 → 401
+  const s2 = { nodes: [], tracks: {}, connection: { requestRejection: () => 401 } }
+  const { state: st2 } = await setup(s2)
+  const handler2 = st2.routes.get('/davinci-panel/media')
+  const res2 = fakeRes()
+  await handler2(fakeReq('/davinci-panel/media?path=/tmp/whatever.jpg'), res2)
+  assert(res2.status === 401, `未认证时媒体路由必须 401，实际 ${res2.status}`)
+}
+
 await testTrackReadErrors()
+await testMediaRouteAdmission()
 
 await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
 if (failures) { console.error(`FAIL host_integration.test.mjs — ${failures} 项失败`); process.exitCode = 1 }

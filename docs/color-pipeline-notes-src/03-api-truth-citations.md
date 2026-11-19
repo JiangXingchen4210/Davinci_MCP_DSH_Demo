@@ -1,7 +1,7 @@
 # api_truth 事实条目逐条摘录（本功能相关）
 
 来源：`mcp__resolve__resolve_control action=api_truth`（静态知识库，**不需要** Resolve 运行；返回 `verified_on = DaVinci Resolve Studio 21.0.2`），以及同仓库落盘文件
-`/Users/wupx/Library/Application Support/davinci-resolve-mcp/src/utils/api_truth.py` 与 `docs/reference/api-limitations.md`。
+`$HOME/Library/Application Support/davinci-resolve-mcp/src/utils/api_truth.py` 与 `docs/reference/api-limitations.md`。
 
 > 引用方式：主文档里写「api_truth · <symbol>」，读者可用 `resolve_control api_truth query="<关键词>"` 复现。
 

@@ -1,6 +1,6 @@
 # 05 — 落地与验证：`safe_apply_drx` / readback / confirm_token（摘录）
 
-源码：`PY` = `/Users/wupx/Library/Application Support/davinci-resolve-mcp/src/server.py`；
+源码：`PY` = `$HOME/Library/Application Support/davinci-resolve-mcp/src/server.py`；
 `CT` = `.../src/utils/confirm_tokens.py`；`S` = `resolve-advanced/server`。
 
 ## 1. `_safe_apply_drx`（`PY:30121-30166`）
