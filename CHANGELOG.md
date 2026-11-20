@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.12.2 — 通过 GitHub Actions Trusted Publisher 发布（启用 npm provenance）
+
+- 无功能变更：0.12.1 的可选视频抠像、自动安装运行时等能力保持不变
+- 改为通过 `.github/workflows/publish.yml` 的 OIDC Trusted Publisher 发布，使用 `npm publish --provenance`
+- 目的：让 0.12.2 起在 npm 版本列表显示绿色 provenance 标记；0.12.0/0.12.1 的标记无法事后补
+- 本地发布不再作为发布路径；后续版本统一走 Actions
+
 ## 0.12.1 — 视频抠像改为可选功能（默认关闭，启用自动安装）
 
 - 「视频抠像/合成」改为可选功能：默认关闭时页签完全隐藏，调色/剪辑等其它功能不受影响
