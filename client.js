@@ -267,7 +267,8 @@ window.__ModuleLoader__.load({
         'cam.unknown': '还没识别。',
         'tab.vibe': 'Vibe 三级',
         'tab.scenes': '场景/剪辑',
-        'tab.fx': '贴图/擦除',
+        'tab.fx': '静态抠像演示',
+        'tab.videoAlpha': '视频抠像/合成',
         'vibe.title': 'Vibe 调色（三级 + 意图）',
         'vibe.hint': '用一句话说感觉，例如“我感觉有点太绿了”或“这个绿幕的绿色溢出好明显”。前者走一级去偏色，后者走二级绿色 qualifier 键控——面板会分别处理。',
         'vibe.placeholder': '例如：整体有点绿，肤色想更干净一点；高光别那么爆',
@@ -286,10 +287,43 @@ window.__ModuleLoader__.load({
         'scenes.edit': '自动剪辑（按目标时长出 selects 时间线）',
         'scenes.editRun': '生成剪辑时间线',
         'scenes.target': '目标时长(秒)',
-        'fx.title': '贴图（抠图 → 跟随）',
-        'fx.hint': '支持 PNG/JPG/WebP：上传后自动抠图（macOS Vision 前景实例分割），输出带 alpha 的 PNG。',
+        'fx.title': '静态图片抠像 → 贴图（演示，非视频抠像）',
+        'fx.hint': '静态单帧演示：上传一张图片做前景分割，输出 alpha PNG 再贴到片段；不做视频逐帧抠像，不代表视频级能力。视频级请用右侧「视频抠像/合成」页。',
         'fx.upload': '上传图片',
         'fx.cutout': '自动抠图',
+        'fx.fromPlayhead': '抓播放头源帧',
+        'fx.alphaPreview': '透明底预览（棋盘格 = 透明）',
+        'fx.alphaPng': 'alpha PNG',
+        'fx.overlayApply': '叠加到当前片段',
+        'fx.overlayHint': '叠加使用当前播放头所在片段；先在时间线把播放头放到目标片段，再点此按钮。',
+        'alpha.videoTitle': '① 带 alpha 通道的视频 → 合成',
+        'alpha.videoHint': '导入 ProRes 4444 / PNG 序列等本身带 alpha 的视频，作为随时间播放的前景，叠到当前播放头片段同一时间点；保持时长/帧率/透明。',
+        'alpha.composite': '导入并叠加',
+        'alpha.cutoutTitle': '② 普通视频 → RVM 时域抠像（跟踪框 + 深度遮挡）',
+        'alpha.cutoutHint': '从媒体池选源视频：RVM 时域抠像 + 跟踪框门限 + 深度遮挡，生成 1920×1080 / 16-bit alpha / ProRes 4444 再叠到 V2。跟踪框用于 mask 空间门限，不是多目标实例分割；深度遮挡是单目深度估计，需抽帧复核；任一帧失败会明确报错。',
+        'alpha.sources': '读取媒体池',
+        'alpha.refreshSources': '刷新源列表',
+        'alpha.pickSource': '选择源视频',
+        'alpha.pickAlphaClip': '从媒体池选择带 alpha 的视频（或直接填路径）',
+        'alpha.target': '目标片段（当前播放头）',
+        'alpha.duration': '时长(s)',
+        'alpha.fps': '采样fps',
+        'alpha.cutout': '生成并叠加',
+        'alpha.mode': '模式',
+        'alpha.frames': '帧数',
+        'alpha.noTracking': 'RVM 时域抠像 + 跟踪框门限；深度遮挡是估计值，不是逐像素真值。',
+        'alpha.previewAt': '预览帧',
+        'alpha.previewSource': '预览源首帧',
+        'feature.title': '功能开关：视频级抠像（可选）',
+        'feature.hint': '默认关闭，关闭时「视频抠像/合成」界面完全隐藏。启用会创建一个本地 Python venv，安装 onnxruntime/numpy/opencv，并下载 RVM + Depth Anything V2 模型（约 60MB+，需联网，首次可能几分钟）。',
+        'feature.enable': '启用并自动安装',
+        'feature.disable': '关闭并隐藏界面',
+        'feature.status': '重新检测',
+        'feature.on': '视频抠像已启用',
+        'feature.off': '视频抠像未启用',
+        'feature.hidden': '未启用：不显示视频抠像相关界面；不影响调色、剪辑和其他功能。',
+        'alpha.boxHint': '在首帧上拖出一个框，框住要保留的主体；不拖框则自动取显著主体。',
+        'alpha.boxReady': '主体框已选：生成时只保留框内跟踪主体。',
         'fx.eraseTitle': '擦除（钢丝/威亚/细异物）',
         'fx.eraseHint': '自动检测“细且位置稳定”的异常线并给出 delogo 矩形；渲染会生成一条干净片段并叠到 V2，原片段不动。',
         'fx.detect': '检测细线',
@@ -580,7 +614,8 @@ window.__ModuleLoader__.load({
         'cam.unknown': 'Not detected yet.',
         'tab.vibe': 'Vibe tiers',
         'tab.scenes': 'Scenes/edit',
-        'tab.fx': 'Overlay/erase',
+        'tab.fx': 'Static cutout demo',
+        'tab.videoAlpha': 'Video alpha',
         'vibe.title': 'Vibe grading (three tiers + intent)',
         'vibe.hint': 'Say it in words, e.g. “it feels too green” or “the green spill from the screen is obvious”. The first is a primary cast fix; the second is a keyed green qualifier — handled differently.',
         'vibe.placeholder': 'e.g. overall a bit green, cleaner skin, less blown highlights',
@@ -605,10 +640,43 @@ window.__ModuleLoader__.load({
         'track.hint': '面部跟踪（face.track）与遮罩校验（mask.verify）；抠像在「上传 overlay」时自动执行',
         'track.face': '面部跟踪',
         'track.verify': '遮罩校验',
-        'fx.title': '抠像 / 叠加（先抠像再跟随）',
-        'fx.hint': 'PNG/JPG/WebP: upload and cut out with macOS Vision foreground segmentation into an RGBA PNG.',
+        'fx.title': 'Static image cutout → overlay (demo, NOT video compositing)',
+        'fx.hint': 'Single still-image demo: one PNG/JPG/WebP → RGBA cutout, pasted as a still. This is NOT per-frame video compositing; use the Video alpha tab for video-level work.',
         'fx.upload': 'Upload image',
         'fx.cutout': '抠像',
+        'fx.fromPlayhead': 'Cut out current source frame',
+        'fx.alphaPreview': 'Alpha preview (checkerboard = transparent)',
+        'fx.alphaPng': 'alpha PNG',
+        'fx.overlayApply': 'Overlay on current clip',
+        'fx.overlayHint': 'Overlays on the clip under the playhead; put the playhead on the target clip first.',
+        'alpha.videoTitle': '① Alpha-channel video → composite',
+        'alpha.videoHint': 'Imports a video that already has alpha (ProRes 4444 / PNG sequence) and lays it over the clip under the playhead, preserving duration, fps and transparency.',
+        'alpha.composite': 'Import and overlay',
+        'alpha.cutoutTitle': '② Ordinary video → RVM temporal matte (tracked gate + depth occlusion)',
+        'alpha.cutoutHint': 'RVM temporal matte + tracked box gate + depth occlusion; writes 1920x1080 16-bit alpha ProRes 4444 to V2. The tracked box gates the mask, not a multi-instance subject segmentation; depth occlusion is estimated and needs frame review; any failed frame fails loudly.',
+        'alpha.sources': 'Load Media Pool',
+        'alpha.refreshSources': 'Refresh sources',
+        'alpha.pickSource': 'Pick source clip',
+        'alpha.pickAlphaClip': 'Pick an alpha video from the Media Pool (or type a path)',
+        'alpha.target': 'Target clip (under playhead)',
+        'alpha.duration': 'Duration (s)',
+        'alpha.fps': 'Sample fps',
+        'alpha.cutout': 'Generate and overlay',
+        'alpha.mode': 'Mode',
+        'alpha.frames': 'Frames',
+        'alpha.noTracking': 'RVM temporal matte + tracked box gate; depth occlusion is estimated, not ground truth.',
+        'alpha.previewAt': 'Preview frame',
+        'alpha.previewSource': 'Preview source frame',
+        'feature.title': 'Optional feature: video matting',
+        'feature.hint': 'Off by default; the Video alpha UI is hidden while off. Enabling creates a local Python venv, installs onnxruntime/numpy/opencv and downloads RVM + Depth Anything V2 (60MB+, network required; first run may take minutes).',
+        'feature.enable': 'Enable and auto-install',
+        'feature.disable': 'Disable and hide UI',
+        'feature.status': 'Re-check',
+        'feature.on': 'Video matting enabled',
+        'feature.off': 'Video matting disabled',
+        'feature.hidden': 'Disabled: video-matting UI is hidden; grading, editing and other features are unaffected.',
+        'alpha.boxHint': 'Drag a box around the subject on the first frame; without a box the salient subject is used.',
+        'alpha.boxReady': 'Subject box selected: only the tracked subject inside it is kept.',
         'fx.eraseTitle': 'Erase (wires / rigging)',
         'fx.eraseHint': 'Detects thin, position-stable lines and returns delogo rectangles; rendering builds a clean clip and lays it on V2, leaving the original untouched.',
         'fx.detect': 'Detect lines',
@@ -1059,6 +1127,22 @@ window.__ModuleLoader__.load({
       const [editResult, setEditResult] = React.useState(null)
       const [editSeconds, setEditSeconds] = React.useState(30)
       const [cutoutResult, setCutoutResult] = React.useState(null)
+      const [overlayResult, setOverlayResult] = React.useState(null)
+      const [alphaSources, setAlphaSources] = React.useState([])
+      const [alphaVideoPath, setAlphaVideoPath] = React.useState('')
+      const [alphaVideoClipId, setAlphaVideoClipId] = React.useState('')
+      const [videoSourceClipId, setVideoSourceClipId] = React.useState('')
+      const [videoCutoutDuration, setVideoCutoutDuration] = React.useState(2)
+      const [videoCutoutFps, setVideoCutoutFps] = React.useState(12)
+      const [alphaCompositeResult, setAlphaCompositeResult] = React.useState(null)
+      const [videoCutoutResult, setVideoCutoutResult] = React.useState(null)
+      const [sourcePreview, setSourcePreview] = React.useState(null)
+      const [subjectBox, setSubjectBox] = React.useState(null)
+      const [boxDrag, setBoxDrag] = React.useState(null)
+      const alphaSourcesLoadedRef = React.useRef(false)
+      const [features, setFeatures] = React.useState({ videoMatting: false })
+      const [featureSteps, setFeatureSteps] = React.useState([])
+      const featuresLoadedRef = React.useRef(false)
       const [trackResult, setTrackResult] = React.useState(null)
       const [eraseResult, setEraseResult] = React.useState(null)
       const [commandText, setCommandText] = React.useState('')
@@ -1134,6 +1218,16 @@ window.__ModuleLoader__.load({
           setError(null)
           try {
             const value = await request(op, args)
+            // 业务失败也是失败：op 返回 ok:false 时不能在产品日志里打 ✓
+            const failed = value?.ok === false || value?.success === false
+            if (failed) {
+              const rawError = typeof value?.error === 'string'
+                ? value.error
+                : value?.error?.message ?? value?.reason ?? value?.hint ?? '操作返回失败（ok/success=false）'
+              pushEntry({ label, ok: false, value })
+              setError(cleanMessage(String(rawError)))
+              return value
+            }
             pushEntry({ label, ok: true, value })
             return value
           } catch (cause) {
@@ -1331,7 +1425,130 @@ window.__ModuleLoader__.load({
           reader.readAsDataURL(file)
         })
         const value = await run('mask.cutout', { dataUrl }, t('fx.cutout'))
-        if (value) setCutoutResult(value)
+        if (value?.ok !== false) setCutoutResult(value)
+      }
+
+      const mediaUrl = (filePath) => {
+        if (!filePath) return ''
+        if (typeof document === 'undefined') return `/davinci-panel/media?path=${encodeURIComponent(filePath)}`
+        const url = new URL('davinci-panel/media', document.baseURI)
+        url.searchParams.set('path', filePath)
+        return url.href
+      }
+
+      const pickPlayheadCutout = async () => {
+        const frame = await run('preview.live', { stage: 'source', width: 640 }, t('fx.fromPlayhead'))
+        if (!frame?.path) return
+        const value = await run('mask.cutout', { path: frame.path }, t('fx.cutout'))
+        if (value?.ok !== false) { setCutoutResult(value); setOverlayResult(null) }
+      }
+
+      const applyOverlay = async () => {
+        if (!cutoutResult?.outputPath) return
+        const value = await run('overlay.quick', { itemId, pngPath: cutoutResult.outputPath }, t('fx.overlayApply'))
+        if (value) setOverlayResult(value)
+      }
+
+      const loadAlphaSources = React.useCallback(async () => {
+        const value = await run('alpha.sources', {}, t('alpha.sources'))
+        if (value?.clips) setAlphaSources(value.clips)
+      }, [run, t])
+
+      React.useEffect(() => {
+        if (tab === 'videoAlpha' && !alphaSourcesLoadedRef.current) {
+          alphaSourcesLoadedRef.current = true
+          void loadAlphaSources()
+        }
+      }, [tab, loadAlphaSources])
+
+      const loadFeatures = React.useCallback(async () => {
+        const value = await run('features.get', {}, t('feature.status'))
+        if (value?.ok !== false) setFeatures(value)
+      }, [run, t])
+
+      React.useEffect(() => {
+        if (featuresLoadedRef.current) return
+        featuresLoadedRef.current = true
+        void loadFeatures()
+      }, [loadFeatures])
+
+      React.useEffect(() => {
+        if (!features.videoMatting && tab === 'videoAlpha') setTab('grade')
+      }, [features.videoMatting, tab])
+
+      const enableVideoMatting = async () => {
+        const value = await run('features.set', { videoMatting: true }, t('feature.enable'))
+        if (value?.ok === false) { setFeatureSteps(value.steps ?? []); return }
+        setFeatures({ videoMatting: true, runtime: value?.runtime ?? null })
+        setFeatureSteps(value?.steps ?? [])
+        alphaSourcesLoadedRef.current = false
+        setTab('videoAlpha')
+      }
+
+      const disableVideoMatting = async () => {
+        const value = await run('features.set', { videoMatting: false }, t('feature.disable'))
+        if (value?.ok !== false) {
+          setFeatures({ videoMatting: false })
+          setFeatureSteps([])
+          setTab('grade')
+        }
+      }
+
+      const compositeAlphaVideo = async () => {
+        if (!alphaVideoPath.trim()) return
+        const value = await run('alpha.composite', { filePath: alphaVideoPath.trim(), targetItemId: itemId }, t('alpha.composite'))
+        if (value) setAlphaCompositeResult(value)
+      }
+
+      const runVideoCutout = async () => {
+        if (!itemId || !videoSourceClipId) return
+        const value = await run('video.cutout', {
+          sourceClipId: videoSourceClipId,
+          targetItemId: itemId,
+          durationSec: Number(videoCutoutDuration) || 2,
+          fps: Number(videoCutoutFps) || 12,
+          maxFrames: Math.min(48, Math.max(2, Math.round((Number(videoCutoutDuration) || 2) * (Number(videoCutoutFps) || 12)))),
+          // 不传 width：由 host 按目标时间线原生分辨率处理，避免 UI 又把 1920 缩回 960
+          subjectBox: subjectBox || undefined,
+        }, t('alpha.cutout'))
+        if (value) setVideoCutoutResult(value)
+      }
+
+      const previewSource = async () => {
+        if (!videoSourceClipId) return
+        const value = await run('video.sourcePreview', { sourceClipId: videoSourceClipId, startSec: 0, width: 960 }, t('alpha.previewSource'))
+        if (value?.ok !== false && value?.dataUrl) { setSourcePreview(value); setSubjectBox(null); setBoxDrag(null) }
+      }
+
+      const boxPoint = (event) => {
+        const rect = event.currentTarget.getBoundingClientRect()
+        return {
+          x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+          y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+        }
+      }
+      const onBoxDown = (event) => {
+        if (!sourcePreview) return
+        const point = boxPoint(event)
+        setBoxDrag({ x0: point.x, y0: point.y, x1: point.x, y1: point.y })
+      }
+      const onBoxMove = (event) => {
+        if (!boxDrag) return
+        const point = boxPoint(event)
+        setBoxDrag((drag) => (drag ? { ...drag, x1: point.x, y1: point.y } : drag))
+      }
+      const onBoxUp = () => {
+        if (!boxDrag) return
+        let x = Math.min(boxDrag.x0, boxDrag.x1)
+        let y = Math.min(boxDrag.y0, boxDrag.y1)
+        const w = Math.abs(boxDrag.x1 - boxDrag.x0)
+        const h = Math.abs(boxDrag.y1 - boxDrag.y0)
+        setBoxDrag(null)
+        if (w > 0.01 && h > 0.01) {
+          x = Math.min(x, Math.max(0, 1 - w))
+          y = Math.min(y, Math.max(0, 1 - h))
+          setSubjectBox({ x, y, w, h })
+        }
       }
 
       const detectErase = async () => {
@@ -2066,9 +2283,40 @@ window.__ModuleLoader__.load({
           : null,
       )
 
+      const tabDefs = [
+        ['grade', t('tab.grade')],
+        ['effects', t('tab.effects')],
+        ['look', t('tab.look')],
+        ['vibe', t('tab.vibe')],
+        ['scenes', t('tab.scenes')],
+        ['fx', t('tab.fx')],
+        ...(features.videoMatting ? [['videoAlpha', t('tab.videoAlpha')]] : []),
+      ]
+      const featureCard = h(
+        Card,
+        { title: t('feature.title') },
+        h('div', { style: S.hint }, t('feature.hint')),
+        h('div', { style: S.buttons },
+          features.videoMatting
+            ? h(Button, { onClick: disableVideoMatting, disabled: Boolean(working) }, t('feature.disable'))
+            : h(Button, { variant: 'primary', onClick: enableVideoMatting, disabled: Boolean(working) }, t('feature.enable')),
+          h(Button, { onClick: loadFeatures, disabled: Boolean(working) }, t('feature.status')),
+          h('span', { style: S.hint }, features.videoMatting
+            ? `${t('feature.on')} · runtime ${features.runtime?.ready ? 'ready' : 'missing'}${features.runtime?.source ? ` (${features.runtime.source})` : ''}`
+            : t('feature.off')),
+        ),
+        features.videoMatting ? null : h('div', { style: S.hint }, t('feature.hidden')),
+        featureSteps.length ? h('div', { style: S.hint }, featureSteps.join(' · ')) : null,
+      )
+
       const tabs = h(
         'div',
         { style: S.tabs },
+        tabDefs.map(([key, label]) => h(
+          Button,
+          { key, variant: tab === key ? 'primary' : undefined, onClick: () => setTab(key) },
+          label,
+        )),
       )
 
       const currentCard = h(
@@ -2971,6 +3219,123 @@ window.__ModuleLoader__.load({
         ),
       )
 
+      const alphaPreviewGrid = (result) => {
+        const previews = Array.isArray(result?.previews) ? result.previews.filter((entry) => entry?.dataUrl) : []
+        if (!previews.length) return null
+        return h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 8, marginTop: 8 } },
+          previews.map((entry) => h('div', { key: entry.offset },
+            h('img', { src: entry.dataUrl, style: { width: '100%', borderRadius: 6 } }),
+            h('div', { style: S.hint }, `${t('alpha.previewAt')} ${entry.offset}f`),
+          )),
+        )
+      }
+
+      const videoAlphaTab = h(
+        React.Fragment,
+        null,
+        h(
+          Card,
+          { title: t('alpha.videoTitle') },
+          h('div', { style: S.hint }, t('alpha.videoHint')),
+          h('div', { style: S.buttons },
+            h('input', {
+              value: alphaVideoPath,
+              onChange: (event) => setAlphaVideoPath(event.target.value),
+              placeholder: '/path/to/alpha.mov（ProRes 4444 / 带 alpha）',
+              style: { ...S.input, flex: 1, minWidth: 260 },
+            }),
+            h(Button, { variant: 'primary', onClick: compositeAlphaVideo, disabled: working || !itemId || !alphaVideoPath.trim() }, t('alpha.composite')),
+          ),
+          h('div', { style: S.buttons },
+            h('select', {
+              value: alphaVideoClipId,
+              onChange: (event) => {
+                const id = event.target.value
+                setAlphaVideoClipId(id)
+                const clip = alphaSources.find((entry) => entry.id === id)
+                if (clip?.filePath) setAlphaVideoPath(clip.filePath)
+              },
+              style: S.select,
+            },
+              h('option', { value: '' }, t('alpha.pickAlphaClip')),
+              alphaSources.map((clip) => h('option', { key: clip.id, value: clip.id }, `${clip.name}${clip.derived ? ' · alpha' : ''}`)),
+            ),
+          ),
+          alphaCompositeResult
+            ? h('div', null,
+                alphaCompositeResult.ok === false
+                  ? h('div', { style: S.error }, alphaCompositeResult.error ?? '失败')
+                  : h('div', null,
+                      h('div', { style: S.hint }, `alpha: ${alphaCompositeResult.alpha?.codec ?? ''} ${alphaCompositeResult.alpha?.pixFmt ?? ''} · ${alphaCompositeResult.alpha?.frames ?? '—'} 帧 / ${alphaCompositeResult.alpha?.durationSec ?? '—'}s · fps ${alphaCompositeResult.alpha?.fps ?? '—'}`),
+                      h('div', { style: S.hint }, `placed: ${String(alphaCompositeResult.placement?.placed)} · V2 items: ${alphaCompositeResult.placement?.v2Items ?? '—'} · sync: start ${alphaCompositeResult.sync?.recordFrame ?? '—'} / alpha ${alphaCompositeResult.sync?.alphaFrames ?? '—'}f / target ${alphaCompositeResult.sync?.targetFrames ?? '—'}f`),
+                      alphaCompositeResult.normalization
+                        ? h('div', { style: S.hint }, `归一化: ${alphaCompositeResult.normalization.from} → ${alphaCompositeResult.normalization.to} (${alphaCompositeResult.normalization.pixFmt})`)
+                        : null,
+                      alphaPreviewGrid(alphaCompositeResult),
+                    ),
+              )
+            : null,
+        ),
+        h(
+          Card,
+          { title: t('alpha.cutoutTitle') },
+          h('div', { style: S.hint }, t('alpha.cutoutHint')),
+          h('div', { style: S.buttons },
+            h('select', {
+              value: videoSourceClipId,
+              onChange: (event) => {
+                setVideoSourceClipId(event.target.value)
+                setSourcePreview(null)
+                setSubjectBox(null)
+                setBoxDrag(null)
+                setVideoCutoutResult(null)
+              },
+              style: S.select,
+            },
+              h('option', { value: '' }, t('alpha.pickSource')),
+              alphaSources.filter((clip) => !clip.derived).map((clip) => h('option', { key: clip.id, value: clip.id }, clip.name)),
+            ),
+            h(Button, { onClick: loadAlphaSources, disabled: working }, t('alpha.refreshSources')),
+            h(Button, { onClick: previewSource, disabled: working || !videoSourceClipId }, t('alpha.previewSource')),
+          ),
+          sourcePreview
+            ? h('div', null,
+                h('div', { style: { position: 'relative', maxWidth: 480, marginTop: 8, userSelect: 'none', cursor: 'crosshair' },
+                  onMouseDown: onBoxDown, onMouseMove: onBoxMove, onMouseUp: onBoxUp, onMouseLeave: onBoxUp },
+                  h('img', { src: sourcePreview.dataUrl, draggable: false, style: { display: 'block', width: '100%', borderRadius: 6 } }),
+                  (() => {
+                    const box = boxDrag
+                      ? { x: Math.min(boxDrag.x0, boxDrag.x1), y: Math.min(boxDrag.y0, boxDrag.y1), w: Math.abs(boxDrag.x1 - boxDrag.x0), h: Math.abs(boxDrag.y1 - boxDrag.y0) }
+                      : subjectBox
+                    if (!box) return null
+                    return h('div', { style: { position: 'absolute', left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * 100}%`, border: '2px solid #ffd400', boxShadow: '0 0 0 9999px rgba(0,0,0,0.28)', pointerEvents: 'none' } })
+                  })(),
+                ),
+                h('div', { style: S.hint }, subjectBox ? t('alpha.boxReady') : t('alpha.boxHint')),
+              )
+            : null,
+          h('div', { style: S.hint }, `${t('alpha.target')}: ${item?.name ?? '—'} / ${timeline?.name ?? '—'}`),
+          h('div', { style: S.buttons },
+            h('span', { style: S.hint }, t('alpha.duration')),
+            h('input', { type: 'number', min: 0.5, max: 10, step: 0.5, value: videoCutoutDuration, onChange: (event) => setVideoCutoutDuration(Number(event.target.value) || 2), style: { ...S.input, width: 70 } }),
+            h('span', { style: S.hint }, t('alpha.fps')),
+            h('input', { type: 'number', min: 2, max: 24, step: 1, value: videoCutoutFps, onChange: (event) => setVideoCutoutFps(Number(event.target.value) || 12), style: { ...S.input, width: 60 } }),
+            h(Button, { variant: 'primary', onClick: runVideoCutout, disabled: working || !itemId || !videoSourceClipId }, t('alpha.cutout')),
+          ),
+          videoCutoutResult
+            ? h('div', null,
+                videoCutoutResult.ok === false
+                  ? h('div', { style: S.error }, videoCutoutResult.error ?? '失败')
+                  : h('div', null,
+                      h('div', { style: S.hint }, `${t('alpha.mode')}: ${videoCutoutResult.mode} · ${t('alpha.frames')}: ${videoCutoutResult.matteFrames} · fps ${videoCutoutResult.alpha?.fps ?? '—'} · alpha ${videoCutoutResult.alpha?.pixFmt ?? ''}`),
+                      h('div', { style: S.hint }, videoCutoutResult.trackingImplemented === false ? t('alpha.noTracking') : ''),
+                      alphaPreviewGrid(videoCutoutResult),
+                    ),
+              )
+            : null,
+        ),
+      )
+
       const trackCard = h(
         Card,
         {
@@ -3006,6 +3371,7 @@ window.__ModuleLoader__.load({
                 },
               }),
               h(Button, { onClick: () => overlayInputRef.current?.click(), disabled: working }, t('fx.upload')),
+              h(Button, { onClick: pickPlayheadCutout, disabled: working || !itemId }, t('fx.fromPlayhead')),
             ),
           },
           h('div', { style: S.hint }, t('fx.hint')),
@@ -3013,9 +3379,28 @@ window.__ModuleLoader__.load({
             ? h(
                 'div',
                 null,
-                cutoutResult.thumb ? h('img', { src: cutoutResult.thumb, style: { width: '100%', maxWidth: 420, borderRadius: 8 } }) : null,
-                h('div', { style: S.hint }, `${cutoutResult.method ?? ''} · coverage ${Number((cutoutResult.coverage ?? 0) * 100).toFixed(1)}%`),
-                h('div', { style: S.hint }, `alpha PNG: ${cutoutResult.outputPath ?? ''}`),
+                h('div', { style: S.hint }, t('fx.alphaPreview')),
+                h(
+                  'div',
+                  {
+                    style: {
+                      maxWidth: 420, borderRadius: 8, overflow: 'hidden',
+                      backgroundImage: 'linear-gradient(45deg,#bbb 25%,transparent 25%),linear-gradient(-45deg,#bbb 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#bbb 75%),linear-gradient(-45deg,transparent 75%,#bbb 75%)',
+                      backgroundSize: '24px 24px', backgroundPosition: '0 0,0 12px,12px -12px,-12px 0',
+                    },
+                  },
+                  cutoutResult.outputPath
+                    ? h('img', { src: mediaUrl(cutoutResult.outputPath), alt: 'alpha', style: { display: 'block', width: '100%' } })
+                    : cutoutResult.thumb ? h('img', { src: cutoutResult.thumb, style: { display: 'block', width: '100%' } }) : null,
+                ),
+                h('div', { style: S.hint }, `${cutoutResult.method ?? ''} · coverage ${Number((cutoutResult.coverage ?? 0) * 100).toFixed(1)}% · ${t('fx.alphaPng')}: ${cutoutResult.outputPath ?? ''}`),
+                h('div', { style: S.buttons },
+                  h(Button, { variant: 'primary', onClick: applyOverlay, disabled: working || !itemId || !cutoutResult.outputPath }, t('fx.overlayApply')),
+                ),
+                h('div', { style: S.hint }, t('fx.overlayHint')),
+                overlayResult
+                  ? h('div', { style: S.hint }, `Fusion: ${overlayResult.ok ? 'ok' : 'fail'} · ${overlayResult.comp ?? overlayResult.error ?? ''} · keyframes ${overlayResult.keyframeCount ?? '—'}`)
+                  : null,
               )
             : null,
         ),
@@ -3349,6 +3734,7 @@ window.__ModuleLoader__.load({
           depsBanner,
           helpCard,
           modeCard,
+          featureCard,
           error ? h('div', { style: S.error }, `${t('state.error')}${error}`) : null,
           mode === 'edit' ? mediaCard : null,
           mode === 'edit' ? docsCard : null,
@@ -3366,7 +3752,9 @@ window.__ModuleLoader__.load({
                     ? scenesTab
                     : tab === 'fx'
                       ? fxTab
-                      : pipelineTab,
+                      : tab === 'videoAlpha' && features.videoMatting
+                        ? videoAlphaTab
+                        : pipelineTab,
           restoreCard,
           stylesOneClickCard,
           deliveryCard,

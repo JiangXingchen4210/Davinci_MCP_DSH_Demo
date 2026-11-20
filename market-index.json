@@ -20,7 +20,7 @@
     {
       "name": "davinci-console-demo",
       "description": {
-        "zh": "DaVinci Resolve 调色控制台（DEMO，当前 0.11.3）：灰片还原/官方 LUT 匹配、三层 15 节点调色、10 个风格、黑白柔、遮罩跟踪、交付审批、中文调试日志。需要 macOS + Resolve Studio + Resolve MCP + ffmpeg。",
+        "zh": "DaVinci Resolve 调色控制台（DEMO，当前 0.12.1）：灰片还原/官方 LUT 匹配、三层 15 节点调色、10 个风格、黑白柔、遮罩跟踪、交付审批、中文调试日志。需要 macOS + Resolve Studio + Resolve MCP + ffmpeg。",
         "en": "DaVinci Resolve color console (DEMO): LOG restore with official LUT matching, 3-layer 15-node grade, 10 styles, diffusion, mask/tracking, delivery approval, Chinese debug log. Requires macOS + Resolve Studio + Resolve MCP + ffmpeg."
       },
       "homepage": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo",
@@ -42,6 +42,26 @@
         ]
       },
       "versions": [
+        {
+          "version": "0.12.1",
+          "publishTimestamp": 1795214117,
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          },
+          "source": {
+            "type": "npm"
+          }
+        },
+        {
+          "version": "0.12.0",
+          "publishTimestamp": 1795213324,
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          },
+          "source": {
+            "type": "npm"
+          }
+        },
         {
           "version": "0.11.25",
           "publishTimestamp": 1795113680,

@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 0.12.1 — 视频抠像改为可选功能（默认关闭，启用自动安装）
+
+- 「视频抠像/合成」改为可选功能：默认关闭时页签完全隐藏，调色/剪辑等其它功能不受影响
+- 面板新增「功能开关」：启用后自动创建本地 Python venv、安装 onnxruntime/numpy/opencv/pillow，并下载 RVM + Depth Anything V2 模型；关闭只隐藏界面，不删除已装运行时
+- 运行时优先用插件目录 `.matting`（开发机），否则用 `~/Documents/resolve-console/matting`（npm 安装用户）；缺失时相关 op 明确失败
+- `features.get` / `features.set` 与 `requireVideoMattingEnabled` 门限；`alpha.sources`、`video.sourcePreview`、`alpha.composite`、`video.cutout` 未启用时直接拒绝
+- 发布包仍不内嵌 278MB venv/模型（平台相关），改为首次启用时自动安装；npm 包只带 `scripts/video_matting.py`
+
+## 0.12.0 — 视频级 alpha 合成 / RVM 时域抠像
+
+- 新增「视频抠像/合成」页签：路径①导入本身带 alpha 的视频，按目标片段同起点叠到 V2；路径②普通视频 → RVM 时域抠像 → 带 alpha 的 ProRes 4444 → V2
+- RVM 时域 recurrent 推理 + 跟踪框空间门限 + guided filter 边缘精修；支持手绘主体框与自动显著框
+- 深度遮挡接入 Depth Anything V2（单目深度估计；深度是估计值，需抽帧复核）
+- 原生分辨率 alpha（默认时间线宽度）+ 16-bit RGBA PNG 中间结果 + ProRes 4444 12-bit alpha
+- 格式归一化：VP9/WebM `alpha_mode=1`、非 ProRes 带 alpha 视频先转 ProRes 4444；无 alpha 明确拒绝
+- 严格同步：帧数/时长不符、任一帧失败、跟踪丢失均明确失败；V2 重叠只允许替换插件自己的 alpha 片段
+- 面板修正：ok:false/success:false 记失败、UI 不再固定 960、源列表过滤时间线、子路径媒体 URL、空媒体池不重复拉取、长任务超时放宽
+- 依赖说明：RVM / Depth ONNX 模型与本地 Python venv 不随 npm 包发布；缺失时明确失败，不退回静态 PNG
+
 ## 0.11.25 — 自查与纠错
 
 - **文档隐私**：发布包内的 `docs/**` 去掉绝对路径 `/Users/wupx/...`（改为 `$HOME/...`），避免泄露本机用户名

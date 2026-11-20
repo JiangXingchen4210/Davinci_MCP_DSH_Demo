@@ -7,6 +7,7 @@ import path from 'node:path'
 import os from 'node:os'
 import fs from 'node:fs/promises'
 import { apply } from '../index.js'
+import { spawnSync } from 'node:child_process'
 
 // 测试用自己的数据目录：不写用户 ~/Documents，也不受只读 HOME 影响
 const TEST_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'davinci-console-test-'))
@@ -20,7 +21,7 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 
 function makeFake(state) {
   const calls = []
-  const definitions = ['mcp__resolve__timeline', 'mcp__resolve__timeline_item', 'mcp__resolve__timeline_item_color', 'mcp__resolve__timeline_markers', 'mcp__resolve__graph', 'mcp__resolve__project_settings', 'mcp__resolve__project_manager', 'mcp__resolve__media_pool_item', 'mcp__resolve__render', 'mcp__resolve__resolve_control']
+  const definitions = ['mcp__resolve__timeline', 'mcp__resolve__timeline_item', 'mcp__resolve__timeline_item_color', 'mcp__resolve__timeline_markers', 'mcp__resolve__graph', 'mcp__resolve__project_settings', 'mcp__resolve__project_manager', 'mcp__resolve__media_pool_item', 'mcp__resolve__render', 'mcp__resolve__resolve_control', 'mcp__resolve__lut']
     .map((name) => ({ name }))
   const ctx = {
     effect(fn) { fn() },
@@ -63,6 +64,14 @@ async function dispatch(name, payload, state) {
     if (state.probeError) throw new Error('probe boom')
     return { nodes: state.nodes.map((node) => ({ node_index: node.index, label: node.label, enabled: node.enabled })) }
   }
+  if (name.endsWith('__lut') && action === 'install') {
+    if (state.lutInstallError) throw new Error('lut install boom')
+    return { success: true, set_lut_path: 'MCP/fake-vlog.cube', path: '/tmp/fake-vlog.cube' }
+  }
+  if (name.endsWith('__graph') && action === 'set_lut') {
+    state.setLutCalls = (state.setLutCalls ?? 0) + 1
+    return state.setLutResponse
+  }
   if (name.endsWith('__graph') && action === 'set_node_enabled') {
     const index = Number(params.node_index)
     const enabled = Boolean(params.enabled)
@@ -76,7 +85,17 @@ async function dispatch(name, payload, state) {
     node.enabled = enabled
     return { success: true }
   }
+  if (name.endsWith('__resolve_control') && action === 'get_page') {
+    return { page: state.page ?? 'edit' }
+  }
+  if (name.endsWith('__resolve_control') && action === 'open_page') {
+    state.page = params.page ?? 'edit'
+    state.pageSwitches = (state.pageSwitches ?? 0) + 1
+    return { success: true }
+  }
   if (name.endsWith('__project_settings') && action === 'export_frame_as_still') {
+    state.exportAttempts = (state.exportAttempts ?? 0) + 1
+    if (state.failExportOffEdit && (state.page ?? 'edit') !== 'edit') return { success: false }
     state.captureArrived?.resolve?.()
     if (state.captureGate) await state.captureGate
     if (state.captureError) throw new Error('capture boom')
@@ -269,8 +288,56 @@ async function testMediaRouteAdmission() {
   assert(res2.status === 401, `未认证时媒体路由必须 401，实际 ${res2.status}`)
 }
 
+async function testPreviewPageFallback() {
+  const state = { nodes: [{ index: 10, label: 'L3 · 10 x', enabled: true }], tracks: { 1: ['clip'] }, page: 'deliver', failExportOffEdit: true }
+  const { tool, calls } = await setup(state)
+  const result = await runPreview(tool, { itemId: 'clip', stage: 'current', width: 64 })
+  assert(result?.ok === true, `Deliver 页预览应自动切回 Edit 后成功，实际 ${JSON.stringify(result)}`)
+  assert(calls.some((call) => call.name.endsWith('__resolve_control') && call.action === 'open_page'), '应调用 open_page 切回 Edit')
+  assert(state.page === 'edit', '切页后 page 应为 edit')
+  assert((state.exportAttempts ?? 0) >= 2, '应在第一次导出失败后重试')
+}
+
+async function testExportQc() {
+  const ffmpeg = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8' })
+  if (ffmpeg.status !== 0) { console.log('  SKIP export.qc：本机没有 ffmpeg'); return }
+  const black = path.join(TEST_DATA_DIR, 'qc-black.mp4')
+  const color = path.join(TEST_DATA_DIR, 'qc-color.mp4')
+  spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=320x240:d=1', '-pix_fmt', 'yuv420p', '-y', black])
+  spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=320x240:d=1', '-pix_fmt', 'yuv420p', '-y', color])
+  const state = { nodes: [], tracks: {} }
+  const { tool } = await setup(state)
+  const blackResult = await tool.execute({ op: 'export.qc', args: { path: black } }, { signal: undefined })
+  assert(blackResult?.pass === false, `全黑导出必须 QC 失败，实际 ${JSON.stringify(blackResult)}`)
+  assert(blackResult?.blackSeconds > 0.5, '应报告黑场时长')
+  const colorResult = await tool.execute({ op: 'export.qc', args: { path: color } }, { signal: undefined })
+  assert(colorResult?.pass === true, `纯色正常导出应 QC 通过，实际 ${JSON.stringify(colorResult)}`)
+}
+
+async function testLutAcquireFailureReporting() {
+  const cases = [
+    ['布尔 false', false, false],
+    ['{success:false}', { success: false }, false],
+    ['{success:true}', { success: true }, true],
+  ]
+  for (const [label, response, expected] of cases) {
+    const state = { nodes: [], tracks: {}, setLutResponse: response }
+    const { tool, calls } = await setup(state)
+    const lutPath = path.join(TEST_DATA_DIR, `fake-${String(label).replace(/[^a-z0-9]/gi, '')}.cube`)
+    await fs.writeFile(lutPath, 'TITLE "fake"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n')
+    const result = await tool.execute({ op: 'lut.acquire', args: { name: 'fake-vlog', path: lutPath, itemId: 'clip-1' } }, { signal: undefined })
+    assert(result?.ok === true, `${label}：lut.acquire 自身应返回 ok:true，实际 ${JSON.stringify(result)}`)
+    assert(result?.applied === expected, `${label}：applied 必须为 ${expected}，实际 ${JSON.stringify(result?.applied)}`)
+    assert(calls.some((call) => call.name.endsWith('__lut') && call.action === 'install'), `${label}：应调用 lut.install`)
+    assert(calls.some((call) => call.name.endsWith('__graph') && call.action === 'set_lut'), `${label}：应尝试 graph.set_lut`)
+  }
+}
+
 await testTrackReadErrors()
 await testMediaRouteAdmission()
+await testLutAcquireFailureReporting()
+await testPreviewPageFallback()
+await testExportQc()
 
 await fs.rm(TEST_DATA_DIR, { recursive: true, force: true }).catch(() => {})
 if (failures) { console.error(`FAIL host_integration.test.mjs — ${failures} 项失败`); process.exitCode = 1 }

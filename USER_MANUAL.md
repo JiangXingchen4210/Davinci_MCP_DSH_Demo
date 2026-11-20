@@ -1,4 +1,4 @@
-# 达芬奇调色控制台 · 使用手册（v0.11.25）
+# 达芬奇调色控制台 · 使用手册（v0.12.1）
 
 > 插件名：`@local/davinci-console`（DSH Web 侧边栏「插件 → 达芬奇调色控制台」）
 > 后端：DaVinci Resolve Studio **Patched 21.2**（`/Applications/DaVinci Resolve/DaVinci Resolve.app`）+ Resolve MCP
@@ -17,7 +17,7 @@
 | 风格 | 10 个蒸馏风格（带出处），一键应用；风格是「还原之后」的处理，不绑死 LUT |
 | 质感 | 黑柔/白柔（Fusion Glow）、颗粒记录、胶片模拟 LUT（按风格需要） |
 | 剪辑 | 场景扫描、剧情转写（ASR）、按剧情剪辑、自动剪辑 |
-| 局部 | 抠像（mask.cutout）、面部跟踪（face.track）、遮罩校验（mask.verify）、透视跟踪 |
+| 局部 | 静态抠像（mask.cutout）、视频级抠像（可选，默认关闭）、面部跟踪（face.track）、遮罩校验（mask.verify）、透视跟踪 |
 | 交付 | 选长宽/帧率/码率 → 生成方案 → **你点确认** 才渲染 |
 | 调试 | 调试日志卡片 + `debug.log`，逐条中文说明「阶段/节点/工具/目的/参数」 |
 

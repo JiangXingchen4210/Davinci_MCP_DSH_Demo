@@ -42,7 +42,7 @@ const ROUTE_PATH = '/davinci-panel/action'
 const previewState = { renderInProgress: false, lastStageByItem: new Map() }
 const MEDIA_PATH = '/davinci-panel/media'
 const MAX_BODY_BYTES = 32 * 1024 * 1024
-const CALL_TIMEOUT_MS = 300_000
+const CALL_TIMEOUT_MS = 1_800_000
 // 允许测试/便携安装覆盖数据目录（默认仍是 ~/Documents/resolve-console）
 const DATA_ROOT = process.env.DAVINCI_CONSOLE_DATA_DIR?.trim() || path.join(os.homedir(), 'Documents', 'resolve-console')
 const DATA_DIR = DATA_ROOT
@@ -62,6 +62,34 @@ const LAYERS_CLI = path.join(HERE, 'lib', 'layers.mjs')
 // ---------------------------------------------------------------------------
 // 进程内工具
 // ---------------------------------------------------------------------------
+
+/** 把任意 op 返回值变成 lossless JSON：非有限数、undefined、Error、类实例都归一化。 */
+function sanitizeForJson(value, depth = 0) {
+  if (depth > 8) return null
+  if (value === null || value === undefined) return null
+  const type = typeof value
+  if (type === 'string' || type === 'boolean') return value
+  if (type === 'number') return Number.isFinite(value) ? value : null
+  if (type === 'bigint') return String(value)
+  if (type === 'function' || type === 'symbol') return null
+  if (value instanceof Error) return messageOf(value)
+  if (Array.isArray(value)) return value.map((entry) => sanitizeForJson(entry, depth + 1))
+  if (value instanceof Date) return value.toISOString()
+  const out = {}
+  for (const [key, entry] of Object.entries(value)) out[key] = sanitizeForJson(entry, depth + 1)
+  return out
+}
+
+/** 需要同时拿 stderr 的命令（ffmpeg blackdetect 的检测结果在 stderr）。 */
+function runCapture(command, args, options = {}) {
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: options.timeoutMs ?? 120_000, maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' }, (error, stdout, stderr) => {
+      const stdoutText = Buffer.isBuffer(stdout) ? stdout.toString('utf8') : String(stdout || '')
+      const stderrText = Buffer.isBuffer(stderr) ? stderr.toString('utf8') : String(stderr || '')
+      resolve({ code: error?.code ?? 0, error: error ? String(stderrText || error.message || '') : null, stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout || ''), 'utf8'), stdoutText, stderr: stderrText })
+    })
+  })
+}
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -249,26 +277,125 @@ async function seekToItem(ctx, signal, itemId) {
 let frameSequence = 0
 let previewSequence = 0
 
+/** 请求指定源帧（源文件绝对帧号）：按源帧率换算秒后抽帧，并读回播放头确认未被移动。 */
+async function opFrameSource(ctx, args, signal) {
+  const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
+  let frame = Number(args.frame)
+  let timelineOffset = Number.isFinite(Number(args.timelineOffset)) ? Number(args.timelineOffset) : null
+  if (!Number.isFinite(frame) && timelineOffset !== null) {
+    // 不给源帧号时，按时间线偏移 + retime 映射到源帧（用于验证映射/变速）
+    const { timelineOffsetToSourceFrames } = await importFresh('lib/time_mapping.mjs')
+    const speedProbe = await settle(callTool(ctx, 'timeline_item', { action: 'get_speed', ...scopeOf(item.id) }, signal))
+    const speedPercent = Number(speedProbe.value?.speed?.Percentage)
+    const speed = Number.isFinite(speedPercent) && speedPercent > 0 ? speedPercent / 100 : 1
+    const timelineFpsValue = await projectFps(ctx, signal)
+    const sourceFpsValue = (await sourceFpsOf(info.filePath)) || timelineFpsValue
+    const sourceOffset = timelineOffsetToSourceFrames(timelineOffset, timelineFpsValue, sourceFpsValue, speed)
+    frame = (Number(info.sourceStartFrame) || 0) + Math.round(sourceOffset ?? 0)
+    args = { ...args, mappedFromTimelineOffset: timelineOffset, mappedSpeed: speed }
+  }
+  if (!Number.isFinite(frame) || frame < 0) throw new Error('frame.source 需要非负的源帧号 frame（或用 timelineOffset）')
+  const clipId = info.clipId ?? item.id
+  const filePath = info.filePath ?? (await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: clipId, key: 'File Path' } }, signal)))?.value?.properties ?? null
+  const timelineFps = await projectFps(ctx, signal)
+  const sourceFps = (await sourceFpsOf(filePath)) || timelineFps
+  const { sourceFrameToSeconds } = await importFresh('lib/time_mapping.mjs')
+  const seconds = sourceFrameToSeconds(frame, sourceFps)
+  if (seconds === null) throw new Error('无法把源帧转换成秒（缺少源帧率）')
+  const before = await settle(callTool(ctx, 'timeline_markers', { action: 'get_current_timecode' }, signal))
+  const dir = await ensureDataDir('frames')
+  const extracted = await callTool(ctx, 'media_pool_item', {
+    action: 'extract_frames',
+    clip_id: clipId,
+    timestamps: [Number(seconds.toFixed(4))],
+    output_dir: dir,
+  }, signal)
+  const after = await settle(callTool(ctx, 'timeline_markers', { action: 'get_current_timecode' }, signal))
+  const framePath = Array.isArray(extracted?.frame_paths) ? extracted.frame_paths[0] : null
+  return {
+    ok: Boolean(framePath),
+    itemId: item.id,
+    sourceFrame: frame,
+    mappedFromTimelineOffset: args.mappedFromTimelineOffset ?? null,
+    mappedSpeed: args.mappedSpeed ?? null,
+    sourceFps,
+    timelineFps,
+    seconds: Number(seconds.toFixed(4)),
+    framePath,
+    playheadBefore: before.ok ? before.value?.timecode ?? null : null,
+    playheadAfter: after.ok ? after.value?.timecode ?? null : null,
+    playheadMoved: Boolean(before.ok && after.ok && before.value?.timecode !== after.value?.timecode),
+    method: 'resolved-source-fps',
+  }
+}
+
 /** 用 Project.ExportCurrentFrameAsStill 把当前播放头画面写成 PNG（带当前调色）。 */
 async function captureRenderedFrame(ctx, signal, label = 'frame') {
   const dir = await ensureDataDir('frames')
   // 序号必须带：同一秒内 before/after 两次抓帧若同名会互相覆盖，渲染增量就会永远是 0
   const filePath = path.join(dir, `${label}-${stamp()}-${++frameSequence}.png`)
-  const value = await callTool(
+  const attempt = async () => callTool(
     ctx,
     'project_settings',
     { action: 'export_frame_as_still', path: filePath },
     signal,
   )
-  if (!value?.success) throw new Error('导出当前帧失败（Resolve 返回 False）')
+  let value = await attempt()
+  // Deliver 页上 ExportCurrentFrameAsStill 会返回 False（实测）；预览前自动回 Edit 页重试一次。
+  let pageFallback = null
+  if (!value?.success) {
+    const page = await settle(callTool(ctx, 'resolve_control', { action: 'get_page' }, signal))
+    const currentPage = page.ok ? page.value?.page : null
+    if (currentPage && currentPage !== 'edit') {
+      const switched = await settle(callTool(ctx, 'resolve_control', { action: 'open_page', params: { page: 'edit' } }, signal))
+      if (switched.ok) {
+        pageFallback = { from: currentPage, to: 'edit' }
+        value = await attempt()
+      }
+    }
+  }
+  if (!value?.success) throw new Error('导出当前帧失败（Resolve 返回 False；已尝试从非 Edit 页切回 Edit 页）')
   const stat = await fs.stat(filePath)
-  return { path: filePath, bytes: stat.size }
+  return { path: filePath, bytes: stat.size, pageFallback }
 }
 
 /**
  * 抓当前片段的「源」帧（不含调色），用于从零建立 look。
  * 需要 media pool item + 片段内的源时间；任何一步拿不到就返回 null，由调用方降级。
  */
+/** 读源文件真实帧率（ffprobe 的 r_frame_rate），用于源帧→秒换算；缓存避免重复探测。 */
+const SOURCE_FPS_CACHE = new Map()
+async function sourceFpsOf(filePath) {
+  if (!filePath) return null
+  if (SOURCE_FPS_CACHE.has(filePath)) return SOURCE_FPS_CACHE.get(filePath)
+  try {
+    const probe = await ffprobeJson(filePath)
+    const raws = (probe?.streams ?? []).filter((stream) => stream.codec_type === 'video').map((stream) => stream.r_frame_rate ?? stream.avg_frame_rate)
+    const { parseRate } = await importFresh('lib/time_mapping.mjs')
+    for (const raw of raws) {
+      const parsed = parseRate(raw)
+      if (!parsed) continue
+      const value = parsed.num / parsed.den
+      if (Number.isFinite(value) && value > 0) {
+        SOURCE_FPS_CACHE.set(filePath, value)
+        return value
+      }
+    }
+  } catch { /* 读不到就返回 null，由调用方降级 */ }
+  return null
+}
+
+/** 从代表帧算语义特征（64x36 RGB）；失败返回 null，不阻断剪辑。 */
+async function semanticFeaturesForFrame(framePath) {
+  if (!framePath) return null
+  try {
+    const raw = await runCapture('ffmpeg', ['-v', 'error', '-i', framePath, '-vf', 'scale=64:36', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'], { timeoutMs: 60_000 })
+    const buf = Buffer.isBuffer(raw.stdout) ? raw.stdout : Buffer.from(raw.stdout ?? '', 'binary')
+    const { semanticFeaturesFromRgb } = await importFresh('lib/semantic.mjs')
+    return semanticFeaturesFromRgb(buf, 64, 36)
+  } catch { return null }
+}
+
 async function captureSourceFrame(ctx, signal, itemId) {
   const scope = scopeOf(itemId)
   const [mediaItem, sourceStart, itemStart, settings] = await Promise.all([
@@ -300,9 +427,19 @@ async function exportSourceFrame(ctx, signal, itemId) {
   const timelineStartFrame = Number(recordFrames?.start_frame ?? 0)
   if (!Number.isFinite(playheadFrame) || !Number.isFinite(timelineStartFrame)) return null
 
+  // 时间线帧偏移 → 源帧偏移：必须按 源帧率/时间线帧率 缩放，不能直接相加（混帧率会得到 5s 而不是 2.002s）
+  const { timelineOffsetToSourceFrames } = await importFresh('lib/time_mapping.mjs')
+  const clipProps = await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: mediaPoolId, key: 'File Path' } }, signal))
+  const filePath = clipProps.ok ? clipProps.value?.properties : null
+  const sourceFps = (await sourceFpsOf(filePath)) || fps
+  // retime：1 帧时间线前进的源秒数按 speed（Percentage/100）缩放；读不到就按 100% 并在结果里标明
+  const speedProbe = await settle(callTool(ctx, 'timeline_item', { action: 'get_speed', ...scopeOf(itemId) }, signal))
+  const speedPercent = Number(speedProbe.value?.speed?.Percentage)
+  const speed = Number.isFinite(speedPercent) && speedPercent > 0 ? speedPercent / 100 : 1
   const offset = playheadFrame - timelineStartFrame - (Number.isFinite(itemStartFrame) ? itemStartFrame : 0)
-  const sourceFrame = sourceStartFrame + Math.max(0, offset)
-  const seconds = sourceFrame / fps
+  const sourceOffset = timelineOffsetToSourceFrames(Math.max(0, offset), fps, sourceFps, speed) ?? Math.max(0, offset)
+  const sourceFrame = sourceStartFrame + Math.round(sourceOffset)
+  const seconds = sourceFrame / sourceFps
 
   const dir = await ensureDataDir('frames')
   const value = await callTool(
@@ -313,7 +450,7 @@ async function exportSourceFrame(ctx, signal, itemId) {
   )
   const framePath = Array.isArray(value?.frame_paths) ? value.frame_paths[0] : null
   if (!framePath) return null
-  return { path: framePath, sourceSeconds: seconds, sourceFrame }
+  return { path: framePath, sourceSeconds: seconds, sourceFrame, sourceFps, timelineFps: fps, speed }
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,6 +1440,7 @@ async function clipSourceInfo(ctx, signal, item) {
     filePath,
     sourceStartFrame: srcStart.ok ? Number(srcStart.value?.frame) : null,
     sourceEndFrame: srcEnd.ok ? Number(srcEnd.value?.frame) : null,
+    sourceFps: await sourceFpsOf(filePath),
   }
 }
 
@@ -1344,17 +1482,24 @@ async function opScenesScan(ctx, args, signal) {
     const { intersectShotWithSource } = await importFresh('lib/source_range.mjs')
     const sourceStart = Number.isFinite(info.sourceStartFrame) ? info.sourceStartFrame : 0
     const sourceEnd = Number.isFinite(info.sourceEndFrame) ? info.sourceEndFrame : sourceStart + Math.max(1, Math.round(Number(info.duration) || 0))
+    // Resolve 的 source_start/source_end 是「源帧率」帧号；镜头检测也是源文件秒。这里必须用源帧率，
+    // 不能用项目帧率，否则 59.94p 素材会被当成 24fps 源（edit.auto 黑场的根因）。
+    const sourceFps = Number.isFinite(Number(info.sourceFps)) && info.sourceFps > 0 ? Number(info.sourceFps) : fps
     for (const shot of scan.shots ?? []) {
       // 交给纯函数做交集：镜头按整段源素材扫描，但只能用时间线片段实际可用的源区间
       const range = intersectShotWithSource({
         shotStartSec: shot.start,
         shotEndSec: shot.end,
-        fps,
+        fps: sourceFps,
         sourceStartFrame: sourceStart,
         sourceEndFrame: sourceEnd,
         recordStart: info.recordStart,
       })
       if (!range.ok) continue
+      const inSec = range.inFrame / sourceFps
+      const outSec = range.outFrame / sourceFps
+      const recordStart = info.recordStart + Math.round(((range.inFrame - sourceStart) / sourceFps) * fps)
+      const durationFrames = Math.max(1, Math.round(((range.outFrame - range.inFrame) / sourceFps) * fps))
       const shotFrameTimes = Array.isArray(shot.frameTimes)
         ? shot.frameTimes
         : (shot.frames ?? []).map((frame, index) => (Number.isFinite(Number(frame)) ? Number(frame) : null)).map((value) => value ?? (shot.start + ((shot.end - shot.start) * [0.15, 0.5, 0.85][index])))
@@ -1364,7 +1509,7 @@ async function opScenesScan(ctx, args, signal) {
         const time = shotFrameTimes[index]
         if (!Number.isFinite(Number(time))) continue
         const seconds = Number(time)
-        if (seconds >= range.inFrame / fps && seconds < range.outFrame / fps) {
+        if (seconds >= inSec && seconds < outSec) {
           keep.push(shot.frames[index])
           keepTimes.push(Number(seconds.toFixed(3)))
         }
@@ -1375,24 +1520,30 @@ async function opScenesScan(ctx, args, signal) {
         try {
           const remeasured = JSON.parse(await run(process.execPath, [
             path.join(HERE, 'lib', 'scenes.mjs'), 'metrics', info.filePath,
-            String((range.inFrame / fps).toFixed(3)), String((range.outFrame / fps).toFixed(3)), '--json',
+            String(inSec.toFixed(3)), String(outSec.toFixed(3)), '--json',
           ], { timeoutMs: 120_000 }))
           metrics = remeasured.metrics ?? metrics
         } catch { /* 保留原指标，但下面会标注 */ }
       }
+      const semanticFrame = keep[Math.floor(keep.length / 2)] ?? keep[0] ?? null
+      const semantic = await semanticFeaturesForFrame(semanticFrame)
       scenes.push({
         index: sceneIndex++,
+        semantic,
         itemId: info.itemId,
         clipId: info.clipId,
         clipName: info.name,
         fileName: path.basename(info.filePath),
-        recordStart: range.recordStart,
-        recordEnd: range.recordEnd,
-        durationFrames: range.durationFrames,
+        filePath: info.filePath,
+        recordStart,
+        recordEnd: recordStart + durationFrames,
+        durationFrames,
+        durationSeconds: outSec - inSec,
+        sourceFps,
         sourceStartFrame: range.inFrame,
         sourceEndFrame: range.outFrame,
-        startSeconds: range.inFrame / fps,
-        endSeconds: range.outFrame / fps,
+        startSeconds: inSec,
+        endSeconds: outSec,
         clippedHeadFrames: range.clippedHeadFrames,
         clippedTailFrames: range.clippedTailFrames,
         frames: keep,
@@ -1508,24 +1659,323 @@ async function opGradeTiers(ctx, args, signal) {
 /**
  * 自动剪辑：基于场景扫描与 lib/edit3.mjs 的可解释决策，直接建一条新时间线（不改原时间线）。
  */
+/**
+ * 用 Host 的视觉模型给镜头代表帧打语义标签（ctx.llm + ctx.attachments）。
+ * 不可用/模型不支持 image/调用失败都返回 {ok:false, error}，由 edit.auto 回退到调色板启发式。
+ */
+async function visionAnalyzeScenes(ctx, scenes, { theme = 'auto', provider, model, maxImages = 8, signal } = {}) {
+  const get = (key) => {
+    try { return typeof ctx.get === 'function' ? ctx.get(key) : null } catch { return null }
+  }
+  const llm = get('llm')
+  const attachments = get('attachments')
+  const defaults = get('agentDefaultModel')
+  if (!llm || !attachments) return { ok: false, error: 'Host 没有可用的 llm/attachments 服务（无法调用视觉模型）' }
+  let selected = null
+  try { selected = defaults?.currentSelection?.() ?? null } catch { selected = null }
+  const useProvider = String(provider ?? selected?.provider ?? '')
+  const useModel = String(model ?? selected?.model ?? '')
+  if (!useProvider || !useModel) return { ok: false, error: '没有可用的默认模型（provider/model 为空）' }
+  try {
+    let info = null
+    try { info = await llm.resolveModelInfo(useProvider, useModel, signal) } catch { info = null }
+    const modalities = info?.inputModalities
+    if (Array.isArray(modalities) && !modalities.includes('image')) {
+      return { ok: false, provider: useProvider, model: useModel, error: `模型 ${useProvider}/${useModel} 不支持 image 输入` }
+    }
+    const { buildVisionUserPrompt, VISION_SYSTEM_PROMPT, parseVisionLabels } = await importFresh('lib/vision_semantic.mjs')
+    const limits = attachments.imageLimits ?? {}
+    const batchLimit = Math.max(1, Math.min(Number(maxImages) || 8, Number(limits.maxImagesPerMessage) || 8, 8))
+    const frameScene = (scene) => scene.frames?.[Math.floor((scene.frames?.length ?? 0) / 2)] ?? scene.frames?.[0] ?? null
+    const targets = (scenes ?? []).filter((scene) => frameScene(scene))
+    if (!targets.length) return { ok: false, error: '没有可用的镜头代表帧' }
+    const labels = []; const batches = []; let lastError = null
+    for (let offset = 0; offset < targets.length; offset += batchLimit) {
+      const chunk = targets.slice(offset, offset + batchLimit)
+      const inputs = []
+      for (const scene of chunk) {
+        const framePath = frameScene(scene)
+        const data = await fs.readFile(framePath)
+        inputs.push({ data, mediaType: 'image/jpeg', name: `scene-${scene.index}.jpg` })
+      }
+      const refs = await attachments.saveImages(inputs)
+      const content = [{ type: 'text', text: buildVisionUserPrompt({ theme, count: refs.length }) }]
+      for (const ref of refs) content.push({ type: 'image', attachment: ref })
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(new Error('视觉模型超时（120s）')), 120_000)
+      const abort = () => controller.abort(signal?.reason ?? new Error('aborted'))
+      if (signal?.aborted) abort()
+      else signal?.addEventListener?.('abort', abort, { once: true })
+      let text = ''
+      try {
+        const stream = llm.stream({
+          provider: useProvider,
+          model: useModel,
+          system: VISION_SYSTEM_PROMPT,
+          messages: [{ role: 'user', content }],
+          temperature: 0,
+          maxTokens: Math.max(600, refs.length * 180),
+          signal: controller.signal,
+        })
+        for await (const chunk of stream) {
+          if (chunk?.type === 'text-delta') text += chunk.text ?? ''
+          if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') throw new Error(chunk.reason.failure?.message ?? '模型调用失败')
+        }
+      } finally {
+        clearTimeout(timer)
+        signal?.removeEventListener?.('abort', abort)
+      }
+      const parsed = parseVisionLabels(text, refs.length)
+      if (!parsed.ok) { lastError = parsed.error; batches.push({ ok: false, error: parsed.error }); continue }
+      for (const label of parsed.labels) {
+        labels.push({ ...label, index: (chunk[label.index - 1]?.index ?? label.index) })
+      }
+      batches.push({ ok: true, count: refs.length, provider: useProvider, model: useModel })
+    }
+    if (!labels.length) return { ok: false, provider: useProvider, model: useModel, error: lastError || '视觉模型没有返回可用标签', batches }
+    return { ok: true, provider: useProvider, model: useModel, labels, batches }
+  } catch (error) {
+    return { ok: false, provider: useProvider, model: useModel, error: messageOf(error) }
+  }
+}
+
+/** 通用视觉 JSON 调用：一组图片 + system/user 提示词，返回模型文本。 */
+async function visionJsonCall(ctx, { images, system, userText, provider, model, maxTokens = 1200, signal } = {}) {
+  const get = (key) => { try { return typeof ctx.get === 'function' ? ctx.get(key) : null } catch { return null } }
+  const llm = get('llm'); const attachments = get('attachments'); const defaults = get('agentDefaultModel')
+  if (!llm || !attachments) return { ok: false, error: 'Host 没有可用的 llm/attachments 服务' }
+  let selected = null
+  try { selected = defaults?.currentSelection?.() ?? null } catch { selected = null }
+  const useProvider = String(provider ?? selected?.provider ?? '')
+  const useModel = String(model ?? selected?.model ?? '')
+  if (!useProvider || !useModel) return { ok: false, error: '没有可用的默认模型' }
+  try {
+    let info = null
+    try { info = await llm.resolveModelInfo(useProvider, useModel, signal) } catch { info = null }
+    if (Array.isArray(info?.inputModalities) && !info.inputModalities.includes('image')) {
+      return { ok: false, provider: useProvider, model: useModel, error: `模型 ${useProvider}/${useModel} 不支持 image 输入` }
+    }
+    const refs = await attachments.saveImages(images)
+    const content = [{ type: 'text', text: userText }]
+    for (const ref of refs) content.push({ type: 'image', attachment: ref })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('视觉模型超时（150s）')), 150_000)
+    const abort = () => controller.abort(signal?.reason ?? new Error('aborted'))
+    if (signal?.aborted) abort(); else signal?.addEventListener?.('abort', abort, { once: true })
+    let text = ''
+    try {
+      const stream = llm.stream({ provider: useProvider, model: useModel, system, messages: [{ role: 'user', content }], temperature: 0, maxTokens, signal: controller.signal })
+      for await (const chunk of stream) {
+        if (chunk?.type === 'text-delta') text += chunk.text ?? ''
+        if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') throw new Error(chunk.reason.failure?.message ?? '模型调用失败')
+      }
+    } finally {
+      clearTimeout(timer); signal?.removeEventListener?.('abort', abort)
+    }
+    return { ok: true, text, provider: useProvider, model: useModel, count: refs.length }
+  } catch (error) {
+    return { ok: false, provider: useProvider, model: useModel, error: messageOf(error) }
+  }
+}
+
+/** 逐秒视觉理解：把镜头按 1fps 抽帧（低分辨率）交给视觉模型，返回带源秒的标签。 */
+async function visionTemporalForScene(ctx, scene, { theme = 'auto', width = 384, maxFrames = 8, signal } = {}) {
+  if (!scene?.filePath) return { ok: false, error: '镜头没有源文件路径' }
+  const duration = Math.max(0.2, Number(scene.durationSeconds) || 0)
+  // 真正 1fps：默认最多 20 秒 × 1 帧；不是把 N 帧均匀铺满整段（那会变成几秒一帧）
+  const count = Math.max(2, Math.min(Number(maxFrames) || 20, Math.floor(duration) || 1))
+  const start = Number(scene.startSeconds) || 0
+  const span = Math.max(0.05, duration - 0.05)
+  const times = Array.from({ length: count }, (_, index) => Math.min(start + Math.max(0.05, span), start + index))
+  const dir = await ensureDataDir(path.join('frames', `temporal-${stamp()}`))
+  const frames = await extractFramesAt(scene.filePath, times, dir, Math.max(128, Math.min(640, Number(width) || 384)))
+  const images = []
+  for (const frame of frames) images.push({ data: await fs.readFile(frame), mediaType: 'image/jpeg', name: path.basename(frame) })
+  const temporal = await importFresh('lib/temporal_vision.mjs')
+  const vs = await importFresh('lib/vision_semantic.mjs')
+  const call = await visionJsonCall(ctx, { images, system: temporal.TEMPORAL_SYSTEM_PROMPT, userText: temporal.buildTemporalPrompt({ theme, times, width }), signal, maxTokens: Math.max(800, images.length * 200) })
+  if (!call.ok) return call
+  const labels = await temporal.parseTemporalLabels(call.text, times, vs.extractJsonArray)
+  if (!labels.ok) return { ...call, ...labels }
+  return { ok: true, provider: call.provider, model: call.model, labels: labels.labels, count: images.length }
+}
+
+/** 压缩尺度实验：同一段镜头在多个帧宽度下做逐秒理解，量化标签一致性。 */
+async function opVisionProbe(ctx, args, signal) {
+  const widths = (Array.isArray(args.widths) ? args.widths : [192, 256, 384, 512])
+    .map((value) => Number(value)).filter((value) => Number.isFinite(value) && value >= 96 && value <= 1024)
+  if (!widths.length) throw new Error('vision.probe 需要 widths（96..1024）')
+  let filePath = String(args.filePath ?? '').trim()
+  let startSec = Number(args.startSec) || 0
+  let durationSec = Number(args.durationSec) || 6
+  if (!filePath && args.itemId) {
+    const { info } = await resolveItemContext(ctx, signal, args.itemId)
+    filePath = info.filePath
+    startSec = Number.isFinite(Number(args.startSec)) ? Number(args.startSec) : (Number(info.sourceStartFrame) || 0) / (Number(info.sourceFps) || 24)
+    durationSec = Number(args.durationSec) || ((Number(info.sourceEndFrame) || 0) - (Number(info.sourceStartFrame) || 0)) / (Number(info.sourceFps) || 24)
+  }
+  if (!filePath) throw new Error('vision.probe 需要 filePath 或 itemId')
+  const fps = Math.max(0.2, Math.min(2, Number(args.fps) || 1))
+  const count = Math.max(2, Math.min(12, Math.ceil(durationSec * fps)))
+  const times = Array.from({ length: count }, (_, index) => startSec + (Math.max(0.05, durationSec - 0.05) * index) / Math.max(1, count - 1))
+  const temporal = await importFresh('lib/temporal_vision.mjs')
+  const vs = await importFresh('lib/vision_semantic.mjs')
+  const results = []
+  for (const width of widths) {
+    const dir = await ensureDataDir(path.join('frames', `probe-${width}-${stamp()}`))
+    let labels = []; let error = null; let provider = null; let model = null
+    try {
+      const frames = await extractFramesAt(filePath, times, dir, width)
+      const images = []
+      for (const frame of frames) images.push({ data: await fs.readFile(frame), mediaType: 'image/jpeg', name: path.basename(frame) })
+      let call = await visionJsonCall(ctx, {
+        images,
+        system: temporal.TEMPORAL_SYSTEM_PROMPT,
+        userText: temporal.buildTemporalPrompt({ theme: String(args.theme ?? 'auto'), times, width }),
+        signal,
+        provider: args.visionProvider,
+        model: args.visionModel,
+        maxTokens: Math.max(700, images.length * 180),
+      })
+      if (!call.ok) error = call.error
+      else {
+        provider = call.provider; model = call.model
+        let parsed = await temporal.parseTemporalLabels(call.text, times, vs.extractJsonArray)
+        if (!parsed.ok) {
+          // 模型偶发夹带说明文字：补一句严格 JSON 再试一次
+          call = await visionJsonCall(ctx, {
+            images,
+            system: temporal.TEMPORAL_SYSTEM_PROMPT,
+            userText: `${temporal.buildTemporalPrompt({ theme: String(args.theme ?? 'auto'), times, width })}\n只输出 JSON 数组，不要任何解释、不要 markdown。`,
+            signal,
+            provider: args.visionProvider,
+            model: args.visionModel,
+            maxTokens: Math.max(700, images.length * 180),
+          })
+          if (call.ok) parsed = await temporal.parseTemporalLabels(call.text, times, vs.extractJsonArray)
+        }
+        if (!parsed.ok) error = parsed.error; else labels = parsed.labels
+      }
+    } catch (err) { error = messageOf(err) }
+    results.push({ width, ok: !error, provider, model, error, labels })
+  }
+  const reference = results.find((entry) => entry.ok)?.labels ?? []
+  const rows = results.map((entry) => ({
+    width: entry.width,
+    ok: entry.ok,
+    error: entry.error,
+    frames: entry.labels.length,
+    sample: entry.labels.slice(0, 3).map((label) => ({ t: label.t, description: label.description.slice(0, 60), action: label.action.slice(0, 40), themeFit: label.themeFit, quality: label.quality })),
+    agreement: entry.ok && reference.length ? temporal.agreement(reference, entry.labels) : null,
+  }))
+  const report = { ok: rows.some((row) => row.ok), filePath, startSec, durationSec, fps, times, rows, note: '同段镜头不同帧宽度下的逐秒理解一致性；reference 取第一个成功宽度' }
+  const outDir = await ensureDataDir('vision')
+  const outPath = path.join(outDir, `probe-${stamp()}.json`)
+  await fs.writeFile(outPath, JSON.stringify(report, null, 2))
+  return sanitizeForJson({ ...report, reportPath: outPath, labelsByWidth: results.map((entry) => ({ width: entry.width, labels: entry.labels })) })
+}
+
 async function opEditAuto(ctx, args, signal) {
   let decide = null
   let decisionKind = 'edit3'
+  const theme = String(args.theme ?? 'auto')
+  const applyTemporalWindows = async (decision, scan) => {
+    if (args.perSecond === false || !decision?.edits?.length) return null
+    const temporal = await importFresh('lib/temporal_vision.mjs')
+    const reports = []
+    for (const edit of decision.edits) {
+      const scene = scan.scenes.find((entry) => entry.index === edit.shotIndex)
+      if (!scene?.filePath) continue
+      let result = null
+      try {
+        result = await visionTemporalForScene(ctx, scene, {
+          theme,
+          width: Number(args.perSecondWidth) || 384,
+          maxFrames: Number(args.perSecondMaxFrames) || 20,
+          signal,
+        })
+      } catch (error) {
+        reports.push({ shotIndex: edit.shotIndex, clipName: scene.clipName, ok: false, error: messageOf(error) })
+        continue
+      }
+      if (!result.ok) {
+        reports.push({ shotIndex: edit.shotIndex, clipName: scene.clipName, ok: false, error: result.error })
+        continue
+      }
+      const durationSec = Number(edit.duration) || Number(edit.out) - Number(edit.in)
+      const windowPlan = temporal.scoreTemporalWindow(result.labels, {
+        startSec: Number(scene.startSeconds) || 0,
+        endSec: Number(scene.endSeconds) || (Number(scene.startSeconds) || 0) + durationSec,
+        durationSec,
+        stepSec: 0.25,
+        theme,
+      })
+      if (!windowPlan.ok) {
+        reports.push({ shotIndex: edit.shotIndex, clipName: scene.clipName, ok: false, error: windowPlan.error, labels: result.labels })
+        continue
+      }
+      edit.in = windowPlan.best.start
+      edit.out = windowPlan.best.end
+      reports.push({
+        shotIndex: edit.shotIndex,
+        clipName: scene.clipName,
+        ok: true,
+        provider: result.provider,
+        model: result.model,
+        chosen: windowPlan.best,
+        labels: result.labels,
+        sourceRange: { start: scene.startSeconds, end: scene.endSeconds },
+      })
+    }
+    return reports.length ? reports : null
+  }
+  const chooseScenes = async (scan) => {
+    const palette = await importFresh('lib/semantic.mjs')
+    const paletteSelection = palette.selectShotsByTheme(scan.scenes, { theme, minScore: args.semanticMinScore })
+    let visionResult = null
+    if (args.useVision !== false) {
+      visionResult = await visionAnalyzeScenes(ctx, scan.scenes, {
+        theme,
+        provider: args.visionProvider,
+        model: args.visionModel,
+        maxImages: args.maxVisionImages,
+        signal,
+      })
+    }
+    let selection = paletteSelection
+    let source = 'palette'
+    if (visionResult?.ok) {
+      const { selectShotsByVision } = await importFresh('lib/vision_semantic.mjs')
+      const visionSelection = selectShotsByVision(scan.scenes, visionResult.labels, { theme })
+      if (visionSelection.kept.length >= 3) {
+        selection = { theme, kept: visionSelection.kept, excluded: visionSelection.excluded }
+        source = 'vision-model'
+      } else {
+        visionResult.relaxedReason = `视觉模型只保留 ${visionSelection.kept.length} 个镜头，回退调色板启发式`
+      }
+    }
+    const relaxed = selection.kept.length < 3
+    const usableScenes = relaxed ? scan.scenes : selection.kept
+    return { selection, usableScenes, relaxed, source, visionResult }
+  }
   try {
     const editscore = await importFresh('lib/editscore.mjs')
     const scan = await opScenesScan(ctx, { ...args, thumbLimit: 0 }, signal)
     const fps = scan.fps ?? 24
-    const shots = scan.scenes.map((scene) => ({
+    const { selection, usableScenes, relaxed, source: semanticSource, visionResult } = await chooseScenes(scan)
+    const shots = usableScenes.map((scene) => ({
       index: scene.index,
       itemId: scene.itemId,
       clipId: scene.clipId,
-      duration: scene.durationFrames / fps,
+      duration: scene.durationSeconds ?? (scene.durationFrames / fps),
       metrics: scene.metrics,
-      start: scene.sourceStartFrame / fps,
-      end: scene.sourceEndFrame / fps,
+      start: scene.startSeconds,
+      end: scene.endSeconds,
+      sourceFps: scene.sourceFps ?? fps,
       sourceStartFrame: scene.sourceStartFrame,
       sourceEndFrame: scene.sourceEndFrame,
       recordStart: scene.recordStart,
+      semanticScore: scene.semanticScore ?? null,
     }))
     const scores = editscore.scoreShots(shots, { preferSharp: args.preferSharp !== false })
     const rhythm = editscore.planRhythm({
@@ -1535,41 +1985,56 @@ async function opEditAuto(ctx, args, signal) {
       beatSeconds: args.beatSeconds,
       bpm: args.bpm,
       minShot: args.minShotDuration,
-      maxShot: args.maxShotDuration,
+      maxShot: args.maxShotDuration ?? Math.max(6, Math.ceil((Number(args.targetDuration) || 20) / Math.max(1, Math.min(usableScenes.length, 4)))),
     })
     decisionKind = 'editscore'
-    decide = {
-      decision: {
-        edits: rhythm.edits,
-        totalDuration: rhythm.totalDuration,
-        dropped: rhythm.dropped,
-        pacing: rhythm.pacing,
-        scores,
-        narrative: editscore.narrativeSummary({ edits: rhythm.edits, scenes: scan.scenes }),
+    const decisionObj = {
+      edits: rhythm.edits,
+      totalDuration: rhythm.totalDuration,
+      dropped: rhythm.dropped,
+      pacing: rhythm.pacing,
+      scores,
+      narrative: editscore.narrativeSummary({ edits: rhythm.edits, scenes: usableScenes }),
+      semantic: {
+        theme, relaxed, source: semanticSource,
+        kept: usableScenes.map((scene) => scene.index),
+        excluded: selection.excluded,
+        vision: sanitizeForJson(visionResult ? { ok: visionResult.ok, provider: visionResult.provider, model: visionResult.model, labels: visionResult.labels, error: visionResult.error, batches: visionResult.batches, relaxedReason: visionResult.relaxedReason ?? null } : { ok: false, error: 'disabled' }),
       },
-      scan,
     }
+    decisionObj.temporal = await applyTemporalWindows(decisionObj, scan)
+    decide = { decision: decisionObj, scan }
   } catch (error) {
     const { planSelects } = await importFresh('lib/edit3.mjs')
     const scan = await opScenesScan(ctx, { ...args, thumbLimit: 0 }, signal)
     const fps = scan.fps ?? 24
-    const shots = scan.scenes.map((scene) => ({
+    const { selection, usableScenes, relaxed, source: semanticSource, visionResult } = await chooseScenes(scan)
+    const shots = usableScenes.map((scene) => ({
       index: scene.index,
       itemId: scene.itemId,
       clipId: scene.clipId,
-      duration: scene.durationFrames / fps,
+      duration: scene.durationSeconds ?? (scene.durationFrames / fps),
       metrics: scene.metrics,
-      sourceStartFrame: Math.round(scene.startSeconds * fps),
-      sourceEndFrame: Math.round(scene.endSeconds * fps),
+      sourceFps: scene.sourceFps ?? fps,
+      sourceStartFrame: scene.sourceStartFrame,
+      sourceEndFrame: scene.sourceEndFrame,
       recordStart: scene.recordStart,
+      semanticScore: scene.semanticScore ?? null,
     }))
     const decision = planSelects({
       shots,
       targetDuration: args.targetDuration,
       minShotDuration: args.minShotDuration,
-      maxShotDuration: args.maxShotDuration,
+      maxShotDuration: args.maxShotDuration ?? Math.max(6, Math.ceil((Number(args.targetDuration) || 20) / Math.max(1, Math.min(usableScenes.length, 4)))),
       preferSharp: args.preferSharp !== false,
     })
+    decision.semantic = {
+      theme, relaxed, source: semanticSource,
+      kept: usableScenes.map((scene) => scene.index),
+      excluded: selection.excluded,
+      vision: sanitizeForJson(visionResult ? { ok: visionResult.ok, provider: visionResult.provider, model: visionResult.model, labels: visionResult.labels, error: visionResult.error, batches: visionResult.batches } : { ok: false, error: 'disabled' }),
+    }
+    decision.temporal = await applyTemporalWindows(decision, scan)
     decide = { decision, scan, fallbackReason: messageOf(error) }
   }
 
@@ -1578,34 +2043,20 @@ async function opEditAuto(ctx, args, signal) {
 
   const timelineName = String(args.name ?? `AI 剪辑 ${stamp()}`)
   const fps = scan.fps ?? 24
-  // 顺序放置：record_frame 必须累计（逐段相接），不能都用 index（会全部叠在开头）
-  let cursor = 0
-  const { clampEditToSource } = await importFresh('lib/source_range.mjs')
-  const clipInfos = decision.edits
-    .map((edit) => {
-      const shot = scan.scenes.find((entry) => entry.index === edit.shotIndex)
-      if (!shot?.clipId) return null
-      const clamped = clampEditToSource({
-        inSec: edit.in,
-        outSec: edit.out,
-        fallbackInSec: shot.sourceStartFrame / fps,
-        fallbackOutSec: shot.sourceEndFrame / fps,
-        sourceStartFrame: shot.sourceStartFrame,
-        sourceEndFrame: shot.sourceEndFrame,
-        fps,
-      })
-      if (!clamped.ok) return null
-      const info = {
-        clip_id: shot.clipId,
-        start_frame: clamped.inFrame,
-        end_frame: clamped.outFrame,
-        record_frame: cursor,
-        track_index: 1,
-      }
-      cursor += clamped.durationFrames
-      return info
-    })
-    .filter(Boolean)
+  // 顺序放置：源帧按源帧率、record 按时间线帧率；两者分开算，mixed fps 才不会留黑场。
+  const { buildClipInfos, toResolveClipInfos } = await importFresh('lib/edit_timing.mjs')
+  const buildShots = scan.scenes.map((scene) => ({
+    index: scene.index,
+    clipId: scene.clipId,
+    sourceFps: scene.sourceFps ?? fps,
+    sourceStartFrame: scene.sourceStartFrame,
+    sourceEndFrame: scene.sourceEndFrame,
+    start: scene.startSeconds,
+    end: scene.endSeconds,
+  }))
+  const built = buildClipInfos({ shots: buildShots, edits: decision.edits, timelineFps: fps })
+  const clipInfos = toResolveClipInfos(built.clipInfos)
+  const sequenceFrames = built.totalFrames
 
   const created = await callTool(
     ctx,
@@ -1619,9 +2070,11 @@ async function opEditAuto(ctx, args, signal) {
     decisionKind,
     narrative: decision.narrative ?? null,
     pacing: decision.pacing ?? null,
+    semantic: decision.semantic ?? null,
+    temporal: decision.temporal ?? null,
     decision,
     clipInfos,
-    sequenceFrames: cursor,
+    sequenceFrames,
     created,
     originalTimeline: scan.timeline,
     fallbackReason: decide.fallbackReason ?? null,
@@ -1867,12 +2320,15 @@ async function extractFramesAt(filePath, times, outDir, width = 1280) {
   const frames = []
   for (let index = 0; index < times.length; index += 1) {
     const out = path.join(outDir, `f-${String(index).padStart(4, '0')}.jpg`)
-    await run(
-      'ffmpeg',
-      ['-v', 'error', '-ss', String(Math.max(0, times[index]).toFixed(3)), '-i', filePath, '-frames:v', '1', '-vf', `scale=${width}:-2`, '-q:v', '2', '-y', out],
-      { timeoutMs: 60_000 },
-    )
-    frames.push(out)
+    try {
+      await run(
+        'ffmpeg',
+        ['-v', 'error', '-ss', String(Math.max(0, times[index]).toFixed(3)), '-i', filePath, '-frames:v', '1', '-vf', `scale=${width}:-2`, '-pix_fmt', 'yuvj420p', '-q:v', '2', '-y', out],
+        { timeoutMs: 60_000 },
+      )
+      const stat = await fs.stat(out).catch(() => null)
+      if (stat?.isFile() && stat.size > 0) frames.push(out)
+    } catch { /* 单帧抽不出不拖垮整段逐秒理解 */ }
   }
   return frames
 }
@@ -4006,6 +4462,66 @@ function resolveDeliveryFormat(container, codecArg) {
   return { format: fmt, codec: 'H.264' }
 }
 
+/** 导出后质检：真实文件黑场检测（用户可见故障不能只靠 render 成功布尔）。 */
+async function opExportQc(ctx, args, signal) {
+  const filePath = String(args.path ?? '').trim()
+  if (!filePath) throw new Error('export.qc 需要 path（导出文件绝对路径）')
+  const stat = await fs.stat(filePath).catch(() => null)
+  if (!stat?.isFile()) throw new Error(`文件不存在：${filePath}`)
+  let duration = null
+  try {
+    const probe = await ffprobeJson(filePath)
+    duration = Number(probe?.format?.duration)
+  } catch { /* 时长读不到时由 verdict 判失败 */ }
+  const ffmpeg = await runCapture('ffmpeg', ['-v', 'info', '-i', filePath, '-vf', 'blackdetect=d=0.04:pix_th=0.10', '-an', '-f', 'null', '-'], { timeoutMs: 300_000 })
+  if (ffmpeg.code !== 0 && !/blackdetect/.test(ffmpeg.stderr)) throw new Error(`ffmpeg 质检失败：${ffmpeg.error ?? ''}`)
+  const { parseBlackdetect, qcVerdict } = await importFresh('lib/export_qc.mjs')
+  const parsed = parseBlackdetect(ffmpeg.stderr)
+  const verdict = qcVerdict({ duration, blackSeconds: parsed.blackSeconds, maxBlackSeconds: Number(args.maxBlackSeconds) || 0.2 })
+  // 单帧横向色带/接缝（H.264 编码损伤）检测：缩到 240x136 逐帧看行亮度异常，只报告可疑帧，不直接判 FAIL。
+  let bandFrames = []
+  if (args.detectBands === true) try {
+    const raw = await runCapture('ffmpeg', ['-v', 'error', '-i', filePath, '-vf', 'scale=240:136', '-pix_fmt', 'rgb24', '-f', 'rawvideo', '-'], { timeoutMs: 300_000 })
+    const W = 240; const H = 136; const size = W * H * 3
+    const buf = Buffer.isBuffer(raw.stdout) ? raw.stdout : Buffer.from(raw.stdout ?? '', 'binary')
+    const fps = Number(args.fps) || 24
+    for (let offset = 0, frame = 0; offset + size <= buf.length; offset += size, frame += 1) {
+      const rows = new Float64Array(H)
+      for (let y = 0; y < H; y += 1) {
+        const base = offset + y * W * 3
+        let sum = 0
+        for (let x = 0; x < W; x += 1) {
+          const i = base + x * 3
+          sum += 0.2126 * buf[i] + 0.7152 * buf[i + 1] + 0.0722 * buf[i + 2]
+        }
+        rows[y] = sum / W
+      }
+      let run = 0; let peak = 0
+      for (let y = 6; y < H - 7; y += 1) {
+        const near = (rows[y - 6] + rows[y - 5] + rows[y + 6] + rows[y + 7]) / 4
+        if (Math.abs(rows[y] - near) > 10) { run += 1; peak = Math.max(peak, Math.abs(rows[y] - near)) } else run = 0
+        if (run >= 6 && peak > 20) { bandFrames.push(Number((frame / fps).toFixed(3))); break }
+      }
+      if (bandFrames.length >= 20) break
+    }
+  } catch { bandFrames = [] }
+  return {
+    ok: verdict.pass,
+    path: filePath,
+    bytes: stat.size,
+    duration,
+    blackSeconds: parsed.blackSeconds,
+    blackIntervals: parsed.intervals,
+    pass: verdict.pass,
+    reason: verdict.reason,
+    bandFrames,
+    bandWarning: bandFrames.length > 0,
+    note: verdict.pass
+      ? (bandFrames.length ? `无黑场，但有 ${bandFrames.length} 个可疑单帧色带/接缝（启发式，可能含自然线条；建议用 ProRes 母版 + 软件转码后复验）` : '未检测到超过阈值的黑场')
+      : '导出结果包含用户可见黑场：不要按成功交付',
+  }
+}
+
 async function opRenderDeliver(ctx, args, signal) {
   const width = Math.max(320, Math.min(8192, Number(args.width) || 1920))
   const height = Math.max(180, Math.min(4320, Number(args.height) || 1080))
@@ -4023,16 +4539,17 @@ async function opRenderDeliver(ctx, args, signal) {
       return { ok: false, blocked: true, preflight, error: `预检未通过，不能进入交付：${(preflight.blockedReasons ?? []).join('；') || '时间线不可用'}` }
     }
     const scope = await currentProjectTimeline(ctx, signal)
+    const safeName = String(args.customName ?? scope.timeline ?? '交付').replace(/[\\/:*?"<>|]/g, '_').trim() || '交付'
     const token = `deliver-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
     DELIVERY_PLANS.set(token, {
       width, height, fps, bitrateMbps, container: mapped.format, format: mapped.format, codec: mapped.codec,
-      targetDir, scope, at: Date.now(),
+      targetDir, scope, customName: safeName, at: Date.now(),
     })
     return {
       ok: true,
       approvalRequired: true,
       confirmToken: token,
-      plan: { width, height, fps, bitrateMbps, container, codec: mapped.codec, format: mapped.format, targetDir, project: scope.project, timeline: scope.timeline },
+      plan: { width, height, fps, bitrateMbps, container, codec: mapped.codec, format: mapped.format, targetDir, project: scope.project, timeline: scope.timeline, customName: safeName },
       message: `交付方案：${width}x${height} / ${fps}fps / ${bitrateMbps}Mbps / ${mapped.format.toUpperCase()} ${mapped.codec} → ${targetDir}；确认后才会渲染`,
     }
   }
@@ -4073,7 +4590,7 @@ async function opRenderDeliver(ctx, args, signal) {
       target_dir: plan.targetDir,
       format: plan.format,
       codec: plan.codec,
-      custom_name: `交付_${plan.width}x${plan.height}_${plan.fps}fps_${plan.bitrateMbps}Mbps`,
+      custom_name: plan.customName ?? `交付_${plan.width}x${plan.height}_${plan.fps}fps_${plan.bitrateMbps}Mbps`,
       settings,
       require_temp_target: false,
     }, signal))
@@ -4974,6 +5491,15 @@ const OFFICIAL_LUT_SOURCES = {
   // 例：{ camera: 'dji', url: 'https://www.dji.com/.../D-Log-to-Rec709.cube', note: 'DJI 官网' }
 }
 
+/** set_lut 的布尔/对象两种返回都要严格判真：false 与 {success:false} 绝不能算 applied。 */
+function lutApplySucceeded(settled) {
+  if (!settled?.ok) return false
+  const value = settled.value
+  if (value === true) return true
+  if (value && typeof value === 'object' && value.success === true) return true
+  return false
+}
+
 async function opLutAcquire(ctx, args, signal) {
   const name = String(args.name ?? args.lutName ?? '').trim().replace(/\.cube$/i, '')
   if (!name) throw new Error('lut.acquire 需要 name（LUT 名，不带扩展名）')
@@ -5004,7 +5530,7 @@ async function opLutAcquire(ctx, args, signal) {
       if (args.itemId && installedAuto.ok) {
         appliedAuto = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: Number(args.nodeIndex) || 1, lut_path: installedAuto.value?.set_lut_path ?? name, source: 'item', ...scopeOf(args.itemId) }, signal))
       }
-      return { ok: true, name, source: 'davinci-builtin', builtinPath: builtin.path, staged: installedAuto.ok ? installedAuto.value?.set_lut_path : null, applied: appliedAuto ? Boolean(appliedAuto.ok) : null, note: '使用 DaVinci 自带还原 LUT' }
+      return { ok: true, name, source: 'davinci-builtin', builtinPath: builtin.path, staged: installedAuto.ok ? installedAuto.value?.set_lut_path : null, applied: appliedAuto ? lutApplySucceeded(appliedAuto) : null, applyNote: appliedAuto && !lutApplySucceeded(appliedAuto) ? messageOf(appliedAuto.error) ?? 'graph.set_lut 返回未成功' : null, note: '使用 DaVinci 自带还原 LUT' }
     }
     const official = OFFICIAL_LUT_SOURCES[String(args.cameraKey ?? '').toLowerCase()]
     if (official?.url) {
@@ -5037,8 +5563,8 @@ async function opLutAcquire(ctx, args, signal) {
     bytes,
     path: target,
     staged: installed.ok ? installed.value?.set_lut_path ?? null : null,
-    applied: applied ? Boolean(applied.ok) : null,
-    applyNote: applied && !applied.ok ? messageOf(applied.error) : null,
+    applied: applied ? lutApplySucceeded(applied) : null,
+    applyNote: applied && !lutApplySucceeded(applied) ? (messageOf(applied.error) ?? 'graph.set_lut 返回未成功') : null,
     renderCaveat: '本机 Resolve 21 beta 上 set_lut 挂节点 1 可能不参与渲染（需用渲染帧差分确认；不生效请改用 CST/RCM 路径）',
   }
 }
@@ -5296,21 +5822,601 @@ async function opTextureMist(ctx, args, signal) {
   }
 }
 
+/** 读 PNG/JPEG 像素宽高（用于把透明贴图按原尺寸叠到时间线）。 */
+async function imagePixelSize(filePath) {
+  const buf = await fs.readFile(filePath)
+  if (buf.length > 24 && buf.toString('latin1', 0, 8) === '\x89PNG\r\n\x1a\n') {
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20), format: 'png' }
+  }
+  for (let i = 2; i + 9 < buf.length; i += 1) {
+    if (buf[i] !== 0xff) continue
+    const marker = buf[i + 1]
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return { width: buf.readUInt16BE(i + 7), height: buf.readUInt16BE(i + 5), format: 'jpeg' }
+    }
+  }
+  throw new Error('读不出图片尺寸（只支持 PNG/JPEG）')
+}
+
+
+/** 导入一个本地视频到媒体池，返回 clip id。 */
+async function importVideoToPool(ctx, filePath, signal) {
+  const imported = await settle(callTool(ctx, 'media_pool', {
+    action: 'safe_import_media',
+    params: { paths: [filePath], target_folder: 'Master' },
+  }, signal))
+  if (!imported.ok) throw new Error(`导入媒体失败：${messageOf(imported.error)}`)
+  const clip = (imported.value?.clips ?? [])[0]
+  if (!clip?.id) throw new Error('导入媒体失败：没有返回 clip id')
+  return clip
+}
+
+/** 把前景 clip 放到目标片段同一记录起点的 V2。 */
+async function placeForegroundOnV2(ctx, { clipId, targetItem, frameCount }, signal) {
+  await ensureVideoTrack(ctx, signal, 2)
+  const timeline = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
+  const timelineStart = Number(timeline.ok ? timeline.value?.start_frame : 0) || 0
+  const targetStart = Number(targetItem.start)
+  const targetEnd = targetStart + Math.max(1, Number(frameCount) || 1)
+  // 重复点击保护：V2 有重叠片段时，只替换插件自己生成的 alpha 片段；用户片段一律拒绝。
+  const existing = await settle(callTool(ctx, 'timeline', { action: 'get_items', track_type: 'video', track_index: 2 }, signal))
+  const existingItems = existing.ok && Array.isArray(existing.value?.items) ? existing.value.items : []
+  const { isDerivedAlphaName, overlapsRange } = await importFresh('lib/video_alpha.mjs')
+  const overlapping = existingItems.filter((item) => overlapsRange(item, targetStart, targetEnd))
+  const ours = overlapping.filter((item) => isDerivedAlphaName(item.name))
+  if (overlapping.length > 0 && ours.length !== overlapping.length) {
+    const names = overlapping.map((item) => item.name).join(' / ')
+    throw new Error(`V2 目标区间已有非插件片段（${names}）；为避免重复叠加/误删，本次未做任何修改。请先清空该段 V2 或换目标片段。`)
+  }
+  for (const item of ours) {
+    const deleted = await settle(callTool(ctx, 'timeline', { action: 'delete_clips', clip_ids: [item.id] }, signal))
+    if (!deleted.ok) throw new Error(`替换旧 alpha 片段失败：${messageOf(deleted.error)}；本次未继续叠加，避免重复 V2。`)
+  }
+  const recordFrame = Math.max(0, targetStart - timelineStart)
+  const appended = await settle(callTool(ctx, 'media_pool', {
+    action: 'append_to_timeline',
+    params: {
+      clip_infos: [{
+        clip_id: clipId,
+        start_frame: 0,
+        end_frame: Math.max(1, frameCount),
+        record_frame: recordFrame,
+        track_index: 2,
+        media_type: 1,
+      }],
+    },
+  }, signal))
+  if (!appended.ok) throw new Error(`叠加到 V2 失败：${messageOf(appended.error)}`)
+  const v2 = await settle(callTool(ctx, 'timeline', { action: 'get_items', track_type: 'video', track_index: 2 }, signal))
+  const items = v2.ok && Array.isArray(v2.value?.items) ? v2.value.items : []
+  const appendedItem = appended.value?.items?.[0] ?? null
+  const placed = Boolean(appendedItem?.timeline_item_id) || items.length > 0
+  return { recordFrame, placed, v2Items: items.length, placedItem: appendedItem, appended: appended.value ?? null }
+}
+
+/** 把 V2 前景按目标时间线画幅等比/非等比放大，避免 960 前景在 1920 时间线里只显示半幅。 */
+async function fitForegroundToFrame(ctx, placedItem, { alphaWidth, alphaHeight }, signal) {
+  if (!placedItem?.timeline_item_id || !alphaWidth || !alphaHeight) return { skipped: true, reason: 'missing size/item' }
+  const resolution = await timelineResolution(ctx, signal)
+  const zoomX = resolution.width / Number(alphaWidth)
+  const zoomY = resolution.height / Number(alphaHeight)
+  if (!(zoomX > 0) || !(zoomY > 0) || (Math.abs(zoomX - 1) < 1e-3 && Math.abs(zoomY - 1) < 1e-3)) return { skipped: true, zoomX, zoomY }
+  const applied = await settle(callTool(ctx, 'timeline_item', {
+    action: 'set_transform',
+    timeline_item_id: placedItem.timeline_item_id,
+    ZoomX: zoomX,
+    ZoomY: zoomY,
+  }, signal))
+  return { ok: applied.ok, zoomX: Number(zoomX.toFixed(4)), zoomY: Number(zoomY.toFixed(4)), error: applied.ok ? null : messageOf(applied.error), readback: applied.ok ? applied.value : null }
+}
+
+/** 首/中/末帧合成预览（降低到 640 宽返回 dataUrl），结束后恢复播放头。 */
+async function captureCompositePreviews(ctx, { targetItem, frameCount, fps }, signal) {
+  const original = await settle(callTool(ctx, 'timeline_markers', { action: 'get_current_timecode' }, signal))
+  const timeline = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
+  const timelineStart = Number(timeline.ok ? timeline.value?.start_frame : 0) || 0
+  const { framesToTimecode, isDropFrameRate } = await importFresh('lib/time_mapping.mjs')
+  const offsets = [0, Math.max(1, Math.floor(frameCount / 2)), Math.max(1, frameCount - 1)]
+  const previews = []
+  for (const offset of offsets) {
+    const timecode = framesToTimecode(Number(targetItem.start) + offset, fps, isDropFrameRate(fps))
+    await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode }, signal))
+    const dir = await ensureDataDir('frames')
+    const still = path.join(dir, `alpha-preview-${stamp()}-${offset}.png`)
+    const exported = await settle(callTool(ctx, 'project_settings', { action: 'export_frame_as_still', path: still }, signal))
+    if (!exported.ok || !exported.value?.success) { previews.push({ offset, ok: false, error: '导出合成帧失败' }); continue }
+    const small = still.replace(/\.png$/i, '-small.jpg')
+    await run('ffmpeg', ['-v', 'error', '-i', still, '-vf', 'scale=640:-2', '-q:v', '3', '-y', small], { timeoutMs: 60_000 }).catch(() => null)
+    const bytes = await fs.readFile(small).catch(() => null) ?? await fs.readFile(still)
+    previews.push({ offset, ok: true, path: still, dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}` })
+  }
+  if (original.ok && original.value?.timecode) {
+    await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode: original.value.timecode }, signal))
+  }
+  return previews
+}
+
+/** 供面板选择源视频：列出 Master 文件夹的媒体池条目。 */
+async function opAlphaSources(ctx, args, signal) {
+  await requireVideoMattingEnabled()
+  const res = await settle(callTool(ctx, 'folder', { action: 'get_clips', params: { path: String(args.path ?? 'Master') } }, signal))
+  if (!res.ok) return { ok: false, error: messageOf(res.error) }
+  const raw = Array.isArray(res.value?.clips) ? res.value.clips : []
+  const enriched = await Promise.all(raw.map(async (clip) => {
+    const prop = await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: clip.id, key: ['Type', 'File Path'] } }, signal))
+    const properties = prop.ok ? prop.value?.properties : null
+    const type = String(properties?.Type ?? '')
+    const filePath = String(properties?.['File Path'] ?? '')
+    const isTimeline = /时间线|timeline/i.test(type) || (!filePath && !type)
+    return { id: clip.id, name: clip.name, type, filePath, isTimeline }
+  }))
+  const { isDerivedAlphaName } = await importFresh('lib/video_alpha.mjs')
+  const clips = enriched.filter((clip) => !clip.isTimeline && clip.filePath)
+  return {
+    ok: true,
+    clips: clips.map((clip) => ({ id: clip.id, name: clip.name, filePath: clip.filePath, derived: isDerivedAlphaName(clip.name) })),
+    filtered: enriched.length - clips.length,
+  }
+}
+
+
+/** 面板画主体框用：取源视频首帧（或指定秒）返回 dataUrl + 像素尺寸。 */
+async function opVideoSourcePreview(ctx, args, signal) {
+  await requireVideoMattingEnabled()
+  let sourcePath = String(args.sourcePath ?? '').trim()
+  if (!sourcePath && args.sourceClipId) {
+    const prop = await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: String(args.sourceClipId), key: 'File Path' } }, signal))
+    const properties = prop.ok ? (prop.value?.properties ?? null) : null
+    sourcePath = typeof properties === 'string' ? properties : properties?.['File Path'] ?? ''
+  }
+  if (!sourcePath) throw new Error('video.sourcePreview 需要 sourcePath / sourceClipId')
+  const probe = await ffprobeJson(sourcePath)
+  const stream = (probe.streams ?? []).find((entry) => entry.codec_type === 'video')
+  if (!stream) throw new Error('源文件没有视频轨')
+  const dir = await ensureDataDir(path.join('preview', `source-${stamp()}`))
+  const frames = await extractFramesAt(sourcePath, [Math.max(0, Number(args.startSec) || 0)], dir, Math.max(320, Math.min(1920, Number(args.width) || 960)))
+  if (!frames[0]) throw new Error('源首帧抽取失败')
+  const bytes = await fs.readFile(frames[0])
+  return {
+    ok: true,
+    dataUrl: `data:image/jpeg;base64,${bytes.toString('base64')}`,
+    width: Number(stream.width) || null,
+    height: Number(stream.height) || null,
+    previewWidth: Math.max(320, Math.min(1920, Number(args.width) || 960)),
+    sourcePath,
+  }
+}
+
+/** 路径 A：导入本身就带 alpha 的视频，按目标片段同一时间点叠到 V2。 */
+async function opAlphaComposite(ctx, args, signal) {
+  await requireVideoMattingEnabled()
+  const filePath = String(args.filePath ?? '').trim()
+  if (!filePath) throw new Error('alpha.composite 需要 filePath（带 alpha 的视频）')
+  const stat = await fs.stat(filePath).catch(() => null)
+  if (!stat?.isFile()) throw new Error(`文件不存在：${filePath}`)
+  const probe = await ffprobeJson(filePath)
+  const video = (probe.streams ?? []).find((stream) => stream.codec_type === 'video')
+  if (!video) throw new Error('文件没有视频轨')
+  const pixFmt = String(video.pix_fmt ?? '')
+  const alphaTag = String(video.tags?.alpha_mode ?? video.tags?.ALPHA_MODE ?? probe.format?.tags?.alpha_mode ?? probe.format?.tags?.ALPHA_MODE ?? '').toLowerCase()
+  const hasAlpha = /a/i.test(pixFmt) || alphaTag === '1'
+  if (!hasAlpha) return { ok: false, unsupported: true, error: `该视频没有 alpha 通道（pix_fmt=${pixFmt || 'unknown'}）。请导入 ProRes 4444 / VP9 alpha / PNG 序列等带 alpha 的素材。`, probe: { codec: video.codec_name, pix_fmt: pixFmt, alpha_mode: alphaTag || null, width: video.width, height: video.height } }
+  const { rateValue } = await importFresh('lib/time_mapping.mjs')
+  const fps = Number(video.r_frame_rate ? rateValue(video.r_frame_rate) : null) || Number(args.fps) || 24
+  const durationSec = Number(probe.format?.duration) || (Number(video.duration) || 0)
+  const frameCount = Number(video.nb_frames) || Math.max(1, Math.round(durationSec * fps))
+  const { item: targetItem, trackIndex: targetTrackIndex } = await resolveItemContext(ctx, signal, args.targetItemId)
+  if (Number(targetTrackIndex) > 1) throw new Error(`目标片段在第 ${targetTrackIndex} 轨；请把播放头放在 V1 目标片段上，避免 alpha 叠 alpha。`)
+  const timelineFps = await projectFps(ctx, signal)
+  const timelineFrames = Math.max(2, Math.round(durationSec * timelineFps))
+  // 格式归一化：带 alpha 但不是 ProRes 的容器先转 ProRes 4444；无 alpha 的已经拒绝
+  let importPath = filePath
+  let normalization = null
+  if (!/prores/i.test(String(video.codec_name ?? ''))) {
+    const normDir = await ensureDataDir(path.join('alpha', `normalized-${stamp()}`))
+    const normPath = path.join(normDir, 'alpha-normalized.mov')
+    try {
+      const decoder = /vp9/i.test(String(video.codec_name)) ? ['-c:v', 'libvpx-vp9'] : /vp8/i.test(String(video.codec_name)) ? ['-c:v', 'libvpx'] : []
+      await run('ffmpeg', ['-v', 'error', ...decoder, '-i', filePath, '-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p12le', '-an', '-y', normPath], { timeoutMs: 900_000 })
+    } catch (error) {
+      return { ok: false, unsupported: true, error: `带 alpha 的 ${video.codec_name} 转 ProRes 4444 失败：${messageOf(error).slice(0, 500)}` }
+    }
+    const normProbe = await ffprobeJson(normPath)
+    const normStream = (normProbe.streams ?? []).find((stream) => stream.codec_type === 'video')
+    if (!/a/i.test(String(normStream?.pix_fmt ?? ''))) return { ok: false, unsupported: true, error: '归一化后仍没有 alpha' }
+    normalization = { from: video.codec_name, to: 'prores4444', path: normPath, pixFmt: normStream?.pix_fmt }
+    importPath = normPath
+  }
+  const clip = await importVideoToPool(ctx, importPath, signal)
+  const placement = await placeForegroundOnV2(ctx, { clipId: clip.id, targetItem, frameCount }, signal)
+  const previews = await captureCompositePreviews(ctx, { targetItem, frameCount: timelineFrames, fps: timelineFps }, signal)
+  return {
+    ok: true,
+    mode: 'alpha-video',
+    source: filePath,
+    targetItemId: targetItem.id,
+    alpha: { pixFmt, codec: video.codec_name, width: video.width, height: video.height, fps: Number(fps.toFixed(3)), durationSec: Number(durationSec.toFixed(3)), frameCount },
+    normalization,
+    placement,
+    sync: { targetStart: Number(targetItem.start), recordFrame: placement.recordFrame, alphaFrames: frameCount, alphaFps: Number(fps.toFixed(3)), timelineFrames, timelineFps, targetFrames: Number(targetItem.duration) || null },
+    previews,
+  }
+}
+
+/** 路径 B：普通视频逐帧前景分割，生成 alpha 视频并叠到目标片段；带跨帧跟踪一致性检查。 */
+async function opVideoCutout(ctx, args, signal) {
+  await requireVideoMattingEnabled()
+  const targetItemId = String(args.targetItemId ?? '')
+  if (!targetItemId) throw new Error('video.cutout 需要 targetItemId（目标时间线片段）')
+  let sourcePath = String(args.sourcePath ?? '').trim()
+  if (!sourcePath && args.sourceItemId) {
+    const { info } = await resolveItemContext(ctx, signal, args.sourceItemId)
+    sourcePath = info.filePath
+  }
+  if (!sourcePath && args.sourceClipId) {
+    const prop = await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: String(args.sourceClipId), key: 'File Path' } }, signal))
+    const properties = prop.ok ? (prop.value?.properties ?? null) : null
+    sourcePath = typeof properties === 'string' ? properties : properties?.['File Path'] ?? ''
+  }
+  if (!sourcePath) throw new Error('video.cutout 需要 sourcePath / sourceItemId / sourceClipId')
+  const stat = await fs.stat(sourcePath).catch(() => null)
+  if (!stat?.isFile()) throw new Error(`源视频不存在：${sourcePath}`)
+  const { item: targetItem, info: targetInfo, trackIndex: targetTrackIndex } = await resolveItemContext(ctx, signal, targetItemId)
+  if (Number(targetTrackIndex) > 1) throw new Error(`目标片段在第 ${targetTrackIndex} 轨；请把播放头放在 V1 目标片段上，避免把 alpha 叠到 alpha 上。`)
+  const timelineFps = await projectFps(ctx, signal)
+  const resolution = await timelineResolution(ctx, signal)
+  const backend = String(args.backend ?? 'rvm').toLowerCase()
+  if (!['rvm', 'vision'].includes(backend)) return { ok: false, error: `不支持的抠像后端：${backend}（可用 rvm / vision）` }
+  const sampleFps = Math.max(2, Math.min(Number(timelineFps), Number(args.fps) || Number(timelineFps)))
+  const durationSec = Math.max(0.5, Math.min(Number(args.durationSec) || 2, 10))
+  const width = Math.max(320, Math.min(3840, Number(args.width) || resolution.width))
+  // 源可能是竖屏/不同比例：抽帧保持源比例，不能拿目标时间线比例算 subjectBox 像素。
+  const sourceProbe = await ffprobeJson(sourcePath)
+  const sourceStream = (sourceProbe.streams ?? []).find((stream) => stream.codec_type === 'video')
+  const sourceAspect = Number(sourceStream?.width) > 0 && Number(sourceStream?.height) > 0
+    ? Number(sourceStream.height) / Number(sourceStream.width)
+    : resolution.height / resolution.width
+  const height = Math.max(180, Math.round(width * sourceAspect / 2) * 2)
+  const count = Math.max(2, Math.min(Number(args.maxFrames) || 120, Math.round(durationSec * sampleFps)))
+  const sourceStart = Math.max(0, Number(args.startSec) || 0)
+  const times = Array.from({ length: count }, (_, index) => sourceStart + index / sampleFps)
+  const workDir = await ensureDataDir(path.join('alpha', `cutout-${stamp()}`))
+  const frameDir = path.join(workDir, 'frames')
+  await fs.mkdir(frameDir, { recursive: true })
+  const jpgs = await extractFramesAt(sourcePath, times, frameDir, width)
+  if (jpgs.length !== count) return { ok: false, error: `抽帧不完整：${jpgs.length}/${count}` }
+
+  const matteDir = path.join(workDir, 'matte')
+  await fs.mkdir(matteDir, { recursive: true })
+  let tracking = null
+  let backendReport = null
+
+  if (backend === 'rvm') {
+    const runtime = await resolveMattingRuntime()
+    if (!runtime.ready) return { ok: false, backend: 'rvm', error: '视频抠像运行时未就绪；请重新启用功能开关以自动安装。', hint: '运行时不可用时不退回静态/单帧 Vision' }
+    const python = runtime.python
+    const model = runtime.rvm
+    const { salientBox, trackBox } = await importFresh('lib/cutout.mjs')
+    const { normalizeSubjectBox } = await importFresh('lib/video_alpha.mjs')
+    let subjectBox = args.subjectBox && Number(args.subjectBox.w) > 0 ? normalizeSubjectBox(args.subjectBox, width, height) : (await salientBox(jpgs[0])).box
+    if (!subjectBox) return { ok: false, backend: 'rvm', error: '首帧没有可用的主体框；请传 subjectBox 或检查首帧' }
+    const tracked = await trackBox(jpgs[0], subjectBox, jpgs.slice(1))
+    if (tracked.lostAt !== null && tracked.lostAt !== undefined) {
+      return { ok: false, backend: 'rvm', error: `跨帧跟踪在第 ${tracked.lostAt} 帧丢失；拒绝用全前景分割冒充主体跟踪`, subjectBox, tracking: { lostAt: tracked.lostAt } }
+    }
+    const boxes = [subjectBox, ...tracked.frames.map((frame) => ({ x: frame.x, y: frame.y, w: frame.w, h: frame.h }))]
+    if (boxes.length !== count) return { ok: false, backend: 'rvm', error: `跟踪框数量 ${boxes.length} != 帧数 ${count}` }
+    const boxesPath = path.join(workDir, 'boxes.json')
+    await fs.writeFile(boxesPath, JSON.stringify(boxes))
+    tracking = { subjectBox, frames: tracked.frames.length, lostAt: tracked.lostAt ?? null, implemented: true }
+    try {
+      await run(python, [
+        path.join(HERE, 'scripts', 'video_matting.py'), 'rvm',
+        '--frames', frameDir, '--boxes', boxesPath, '--out', matteDir,
+        '--model', model, '--refine',
+      ], { timeoutMs: 1_800_000 })
+    } catch (error) {
+      return { ok: false, backend: 'rvm', error: `RVM 推理失败：${messageOf(error).slice(0, 800)}` }
+    }
+    backendReport = { backend: 'rvm', model: path.basename(model), temporal: 'recurrent-state', refine: 'guided-filter', edgeRefinement: true, nativeResolution: `${width}x${height}`, bitDepth: 16 }
+  } else {
+    // 旧的逐帧 Vision 全前景路径：保留为显式演示，不冒充跟踪
+    const { cutoutImage } = await importFresh('lib/cutout.mjs')
+    for (let index = 0; index < jpgs.length; index += 1) {
+      const out = path.join(matteDir, `frame-${String(index).padStart(4, '0')}.png`)
+      try { await cutoutImage(jpgs[index], out) }
+      catch (error) { return { ok: false, backend: 'vision', error: `逐帧抠像第 ${index} 帧失败：${messageOf(error)}` } }
+    }
+    backendReport = { backend: 'vision', temporal: 'none', edgeRefinement: false, nativeResolution: `${width}x${height}`, bitDepth: 8 }
+  }
+
+  let effectiveMatteDir = matteDir
+  let depthReport = null
+  if (backend === 'rvm' && args.depthOcclusion !== false) {
+    const runtime = await resolveMattingRuntime()
+    if (!runtime.ready) return { ok: false, backend: 'rvm', error: '视频抠像运行时未就绪；请重新启用功能开关。' }
+    const python = runtime.python
+    const depthModel = runtime.depth
+    const targetFrameDir = path.join(workDir, 'target-frames')
+    const targetDepthDir = path.join(workDir, 'target-depth')
+    const fgDepthDir = path.join(workDir, 'fg-depth')
+    const occludedDir = path.join(workDir, 'depth-occluded')
+    await fs.mkdir(targetFrameDir, { recursive: true })
+    const targetFrames = await extractFramesAt(targetInfo.filePath, times, targetFrameDir, width)
+    if (targetFrames.length !== count) return { ok: false, backend: 'rvm', error: `目标片段抽帧不完整：${targetFrames.length}/${count}` }
+    try {
+      await run(python, [path.join(HERE, 'scripts', 'video_matting.py'), 'depth', '--frames', frameDir, '--out', fgDepthDir, '--model', depthModel], { timeoutMs: 1_800_000 })
+      await run(python, [path.join(HERE, 'scripts', 'video_matting.py'), 'depth', '--frames', targetFrameDir, '--out', targetDepthDir, '--model', depthModel], { timeoutMs: 1_800_000 })
+      const occludeOut = await runCapture(python, [path.join(HERE, 'scripts', 'video_matting.py'), 'occlude', '--alpha', matteDir, '--target-depth', targetDepthDir, '--fg-depth', fgDepthDir, '--out', occludedDir], { timeoutMs: 1_800_000 })
+      if (occludeOut.code !== 0) return { ok: false, backend: 'rvm', error: `深度遮挡失败：${(occludeOut.stderr || occludeOut.stdout || '').slice(0, 500)}` }
+      const parsed = JSON.parse(String(occludeOut.stdoutText ?? '').trim() || '{}')
+      depthReport = { backend: 'depth-anything-v2-small', occludedPixels: parsed.occludedPixels ?? null, frames: parsed.frames ?? count, note: '按单目深度把目标中更近的像素判为遮挡；深度是估计值，需抽帧复核' }
+      effectiveMatteDir = occludedDir
+    } catch (error) {
+      return { ok: false, backend: 'rvm', error: `深度遮挡失败：${messageOf(error).slice(0, 500)}` }
+    }
+  }
+  const matteFiles = (await fs.readdir(effectiveMatteDir)).filter((name) => /^frame-\d{4}\.png$/.test(name)).sort()
+  if (matteFiles.length !== count) {
+    return { ok: false, backend, error: `alpha 帧不完整：${matteFiles.length}/${count}；拒绝生成缺帧序列` }
+  }
+  const alphaMovie = path.join(workDir, 'alpha.mov')
+  const pattern = path.join(effectiveMatteDir, 'frame-%04d.png')
+  await run('ffmpeg', [
+    '-v', 'error', '-framerate', String(sampleFps), '-start_number', '0', '-i', pattern,
+    '-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p12le', '-an', '-y', alphaMovie,
+  ], { timeoutMs: 300_000 })
+  const alphaProbe = await ffprobeJson(alphaMovie)
+  const alphaStream = (alphaProbe.streams ?? []).find((stream) => stream.codec_type === 'video')
+  const alphaPix = String(alphaStream?.pix_fmt ?? '')
+  if (!/a/i.test(alphaPix)) return { ok: false, backend, error: `alpha 视频编码失败：pix_fmt=${alphaPix}`, alphaMovie }
+  const clip = await importVideoToPool(ctx, alphaMovie, signal)
+  const placement = await placeForegroundOnV2(ctx, { clipId: clip.id, targetItem, frameCount: count }, signal)
+  const timelineFrames = Math.max(2, Math.round((count / sampleFps) * timelineFps))
+  const previews = await captureCompositePreviews(ctx, { targetItem, frameCount: timelineFrames, fps: timelineFps }, signal)
+  const expectedSec = count / sampleFps
+  const actualSec = Number(alphaProbe.format?.duration) || 0
+  const syncOk = Math.abs(actualSec - expectedSec) <= 1 / sampleFps + 0.001
+  if (!syncOk) return { ok: false, backend, error: `alpha 时长 ${actualSec}s 与期望 ${expectedSec}s 不一致；拒绝假同步`, alphaMovie }
+  return {
+    ok: true,
+    mode: backend === 'rvm' ? 'tracked-rvm-matte' : 'per-frame-foreground',
+    source: sourcePath,
+    targetItemId: targetItem.id,
+    alphaVideo: alphaMovie,
+    alpha: { pixFmt: alphaPix, codec: alphaStream?.codec_name, fps: Number(sampleFps.toFixed(3)), frames: count, width, height, durationSec: Number(actualSec.toFixed(3)) },
+    matteFrames: count,
+    failures: [],
+    tracking,
+    trackingImplemented: Boolean(tracking?.implemented),
+    subjectSelection: backend === 'rvm' ? 'tracked subject box + RVM alpha' : 'automatic foreground instances (no tracked subject mask)',
+    backendReport,
+    depthOcclusion: depthReport,
+    limitations: backend === 'rvm'
+      ? ['RVM 输出人物/前景 alpha；主体框跟踪已参与裁切与掩膜，但仍不是多目标实例分割', '极快运动/完全遮挡仍可能丢失，丢失会失败而非猜测']
+      : ['每帧独立前景分割，不做跨帧主体跟踪/身份保持'],
+    placement,
+    sync: { targetStart: Number(targetItem.start), recordFrame: placement.recordFrame, alphaFrames: count, alphaFps: Number(sampleFps.toFixed(3)), timelineFrames, timelineFps, targetFrames: Number(targetItem.duration) || null, expectedSec: Number(expectedSec.toFixed(3)), actualSec: Number(actualSec.toFixed(3)), syncOk },
+    previews,
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// 可选功能：视频级抠像（默认关闭，启用时自动安装本地 Python/ONNX 运行时）
+// ---------------------------------------------------------------------------
+
+const FEATURE_FILE = path.join(DATA_DIR, 'features.json')
+const MATTING_RUNTIME_FILE = path.join(DATA_DIR, 'matting-runtime.json')
+const RVM_MODEL_URL = 'https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx'
+const DEPTH_MODEL_URL = 'https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx'
+
+async function readFeatureFlags() {
+  const defaults = { videoMatting: false }
+  const raw = await fs.readFile(FEATURE_FILE, 'utf8').catch(() => null)
+  if (!raw) return defaults
+  try {
+    const parsed = JSON.parse(raw)
+    return { ...defaults, ...(parsed && typeof parsed === 'object' ? parsed : {}) }
+  } catch {
+    return defaults
+  }
+}
+
+async function writeFeatureFlags(patch) {
+  const current = await readFeatureFlags()
+  const next = { ...current, ...(patch ?? {}) }
+  await fs.mkdir(DATA_DIR, { recursive: true })
+  await fs.writeFile(FEATURE_FILE, `${JSON.stringify(next, null, 2)}\n`)
+  return next
+}
+
+function pythonCandidates() {
+  return ['python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3'].map((name) => name)
+}
+
+async function resolveMattingRuntime() {
+  const candidates = [
+    { root: path.join(HERE, '.matting'), source: 'local-dev' },
+    { root: path.join(DATA_DIR, 'matting'), source: 'auto-installed' },
+  ]
+  for (const candidate of candidates) {
+    const python = path.join(candidate.root, 'venv', 'bin', 'python')
+    const rvm = path.join(candidate.root, 'models', 'rvm_mobilenetv3_fp32.onnx')
+    const depth = path.join(candidate.root, 'models', 'depth_anything_v2_small_fp16.onnx')
+    const [pythonStat, rvmStat, depthStat] = await Promise.all([fs.stat(python).catch(() => null), fs.stat(rvm).catch(() => null), fs.stat(depth).catch(() => null)])
+    if (pythonStat?.isFile() && rvmStat?.isFile() && depthStat?.isFile()) {
+      return { ready: true, source: candidate.source, root: candidate.root, python, rvm, depth }
+    }
+  }
+  return { ready: false, source: null, root: null, python: null, rvm: null, depth: null }
+}
+
+async function downloadModel(url, target, minBytes) {
+  const temp = `${target}.part`
+  await fs.mkdir(path.dirname(target), { recursive: true })
+  try {
+    await run('curl', ['-L', '--fail', '--silent', '--show-error', '-o', temp, url], { timeoutMs: 1_800_000 })
+    const stat = await fs.stat(temp)
+    if (!stat.isFile() || stat.size < minBytes) throw new Error(`下载不完整（${stat.size} bytes）`)
+    await fs.rename(temp, target)
+  } finally {
+    await fs.rm(temp, { force: true }).catch(() => {})
+  }
+}
+
+async function setupMattingRuntime() {
+  const existing = await resolveMattingRuntime()
+  if (existing.ready) return { ok: true, alreadyReady: true, ...existing, steps: ['检测到已安装运行时'] }
+  const root = path.join(DATA_DIR, 'matting')
+  const venv = path.join(root, 'venv')
+  const python = path.join(venv, 'bin', 'python')
+  const steps = []
+  const pythonPath = await (async () => {
+    for (const candidate of pythonCandidates()) {
+      const found = await settle(new Promise((resolve, reject) => {
+        execFile(candidate, ['-c', 'import sys; print(sys.executable)'], { timeout: 20_000 }, (error, stdout) => {
+          if (error) reject(error)
+          else resolve(String(stdout).trim())
+        })
+      }))
+      if (found.ok) return found.value
+    }
+    return null
+  })()
+  if (!pythonPath) {
+    return { ok: false, error: '没有找到 Python 3.10+；请先安装 Python（brew install python@3.13）后重试。', steps }
+  }
+  steps.push(`Python: ${pythonPath}`)
+  await fs.mkdir(root, { recursive: true })
+  const venvStat = await fs.stat(python).catch(() => null)
+  if (!venvStat?.isFile()) {
+    await run(pythonPath, ['-m', 'venv', venv], { timeoutMs: 300_000 })
+    steps.push('已创建本地 venv')
+  }
+  const pip = path.join(venv, 'bin', 'pip')
+  await run(pip, ['-q', 'install', '--upgrade', 'pip'], { timeoutMs: 600_000 })
+  await run(pip, ['-q', 'install', 'onnxruntime', 'numpy', 'opencv-python-headless', 'pillow'], { timeoutMs: 1_800_000 })
+  steps.push('已安装 onnxruntime/numpy/opencv/pillow')
+  const models = path.join(root, 'models')
+  const rvm = path.join(models, 'rvm_mobilenetv3_fp32.onnx')
+  const depth = path.join(models, 'depth_anything_v2_small_fp16.onnx')
+  const rvmStat = await fs.stat(rvm).catch(() => null)
+  if (!rvmStat?.isFile() || rvmStat.size < 1_000_000) {
+    await downloadModel(RVM_MODEL_URL, rvm, 1_000_000)
+    steps.push('已下载 RVM 模型')
+  }
+  const depthStat = await fs.stat(depth).catch(() => null)
+  if (!depthStat?.isFile() || depthStat.size < 1_000_000) {
+    await downloadModel(DEPTH_MODEL_URL, depth, 1_000_000)
+    steps.push('已下载 Depth Anything V2 模型')
+  }
+  const runtime = await resolveMattingRuntime()
+  if (!runtime.ready) return { ok: false, error: '运行时安装后自检未通过', steps }
+  await fs.writeFile(MATTING_RUNTIME_FILE, `${JSON.stringify({ ...runtime, installedAt: new Date().toISOString() }, null, 2)}\n`)
+  return { ok: true, alreadyReady: false, ...runtime, steps }
+}
+
+async function opFeaturesGet(ctx, args, signal) {
+  const flags = await readFeatureFlags()
+  const runtime = await resolveMattingRuntime()
+  return { ok: true, videoMatting: Boolean(flags.videoMatting), runtime: { ready: runtime.ready, source: runtime.source }, note: flags.videoMatting ? '已启用' : '未启用；视频抠像界面隐藏' }
+}
+
+async function opFeaturesSet(ctx, args, signal) {
+  const enable = args?.videoMatting === true
+  if (!enable) {
+    const flags = await writeFeatureFlags({ videoMatting: false })
+    return { ok: true, videoMatting: false, disabled: true }
+  }
+  const setup = await setupMattingRuntime()
+  if (!setup.ok) {
+    await writeFeatureFlags({ videoMatting: false })
+    return { ok: false, videoMatting: false, error: setup.error, steps: setup.steps ?? [] }
+  }
+  await writeFeatureFlags({ videoMatting: true })
+  return { ok: true, videoMatting: true, runtime: { ready: true, source: setup.source }, steps: setup.steps ?? [] }
+}
+
+async function requireVideoMattingEnabled() {
+  const flags = await readFeatureFlags()
+  if (!flags.videoMatting) throw new Error('视频级抠像功能未启用：请在面板「功能开关」中启用；启用后会自动安装本地运行时和模型。')
+}
+
+/** 面板“抠像 → 叠加”一键入口：按当前播放头片段与时间线分辨率铺满整帧。 */
+async function opOverlayQuick(ctx, args, signal) {
+  try {
+  const pngPath = String(args.pngPath ?? '').trim()
+  if (!pngPath) throw new Error('overlay.quick 需要 pngPath')
+  const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
+  const size = await imagePixelSize(pngPath)
+  const resolution = await timelineResolution(ctx, signal)
+  const fps = await projectFps(ctx, signal)
+  const durationSec = Number(args.durationSec) > 0 ? Number(args.durationSec) : Math.max(0.5, (Number(info.duration) || 72) / fps)
+  const frames = [
+    { t: 0, x: 0, y: 0, w: resolution.width, h: resolution.height },
+    { t: Math.max(0.1, durationSec - 0.1), x: 0, y: 0, w: resolution.width, h: resolution.height },
+  ]
+  return opOverlayFusion(ctx, {
+    itemId: item.id,
+    pngPath,
+    pngWidth: size.width,
+    frames,
+    frameWidth: resolution.width,
+    frameHeight: resolution.height,
+    fps,
+    fullFrame: true,
+    rebuild: true,
+    compName: 'AutoOverlay',
+    fishRatio: 1,
+    sizeCalibration: 1,
+  }, signal)
+  } catch (error) {
+    return { ok: false, error: messageOf(error), stack: String(error?.stack ?? '') }
+  }
+}
+
 async function opOverlayFusion(ctx, args, signal) {
   const { item } = await resolveItemContext(ctx, signal, args.itemId)
   const png = String(args.pngPath ?? '')
   if (!png) throw new Error('overlay.fusion 需要 pngPath（透明底贴图）')
   const frames = Array.isArray(args.frames) ? args.frames : []
   if (frames.length < 2) throw new Error('overlay.fusion 需要 frames: [{t, x, y, w, h}]（逐帧跟踪框）')
+  const { planOverlayCompAction, OVERLAY_COMP_NAME } = await importFresh('lib/overlay_safety.mjs')
+  const compName = String(args.compName ?? OVERLAY_COMP_NAME)
+  const namesBefore = await settle(callTool(ctx, 'timeline_item_fusion', { action: 'get_comp_names', ...scopeOf(item.id) }, signal))
+  const beforeNamesRaw = namesBefore.ok ? (namesBefore.value?.names ?? namesBefore.value) : []
+  const beforeNames = Array.isArray(beforeNamesRaw) ? beforeNamesRaw.filter((name) => typeof name === 'string') : []
+  let pendingDelete = []
   if (args.rebuild) {
-    const names = await settle(callTool(ctx, 'timeline_item_fusion', { action: 'get_comp_names', ...scopeOf(item.id) }, signal))
-    for (const name of (names.ok ? names.value?.names ?? [] : [])) {
-      await settle(callTool(ctx, 'timeline_item_fusion', { action: 'delete_comp', name, ...scopeOf(item.id) }, signal))
+    const plan = planOverlayCompAction(beforeNames, compName)
+    if (plan.action === 'refuse') {
+      return { ok: false, step: 'comp_conflict', comps: plan.keep, error: plan.reason, hint: '为避免误删用户自己的 Fusion comp，本次没有创建或删除任何 comp。' }
     }
+    // 旧 comp 可能正被加载，DeleteFusionCompByName 会返回 False；先建新 comp 让它变成当前 comp，再删旧的
+    pendingDelete = plan.action === 'replace' ? plan.deleteNames : []
   }
   const comp = await settle(callTool(ctx, 'timeline_item_fusion', { action: 'add_comp', ...scopeOf(item.id) }, signal))
   if (!comp.ok) return { ok: false, step: 'add_comp', error: messageOf(comp.error) }
-  const exists = frames[0]
+  const deleteFailures = []
+  for (const name of pendingDelete) {
+    const deleted = await settle(callTool(ctx, 'timeline_item_fusion', { action: 'delete_comp', name, ...scopeOf(item.id) }, signal))
+    if (!deleted.ok || deleted.value?.success === false) deleteFailures.push(name)
+  }
+  // 给插件自己的 comp 固定命名，后续重复点击只替换它，不碰用户 comp
+  let finalCompName = null
+  let renameWarning = null
+  const namesAfter = await settle(callTool(ctx, 'timeline_item_fusion', { action: 'get_comp_names', ...scopeOf(item.id) }, signal))
+  const afterNamesRaw = namesAfter.ok ? (namesAfter.value?.names ?? namesAfter.value) : []
+  const afterNames = Array.isArray(afterNamesRaw) ? afterNamesRaw.filter((name) => typeof name === 'string') : []
+  const newName = afterNames.find((name) => !beforeNames.includes(name) || name === compName)
+  if (newName && newName !== compName) {
+    const renamed = await settle(callTool(ctx, 'timeline_item_fusion', { action: 'rename_comp', old_name: newName, new_name: compName, ...scopeOf(item.id) }, signal))
+    if (renamed.ok) finalCompName = compName
+    else { finalCompName = newName; renameWarning = `comp 重命名失败：${messageOf(renamed.error) ?? '未知错误'}` }
+  } else {
+    finalCompName = newName ?? compName
+  }
   const mediaIn = 'MediaIn1'
   const mediaOut = 'MediaOut1'
   const newTool = async (type, name, x, y) => {
@@ -5350,6 +6456,11 @@ async function opOverlayFusion(ctx, args, signal) {
   const keyTimes = frames.map((frame) => Number(frame.t))
   const fps = args.fps ?? 24
   const keyframes = frames.map((frame) => {
+    if (args.fullFrame === true) {
+      // 满画幅透明 PNG：Loader 已按合成画幅显示，Size=1 / Center=(0.5,0.5) 才是一比一；
+      // 旧公式再乘 (1920/3840)=0.5 会把图缩到 540 高，底边正好落在 y≈810。
+      return { t: Number(frame.t), center: [0.5, 0.5], size: 1 }
+    }
     // 实测：Fusion Transform 的 Center Y 是「向下」的（不是 Fusion 常见的 Y 向上）
     const scale = ((Number(frame.w) * (args.fishRatio ?? 0.62)) / (args.pngWidth ?? 1200)) * (args.sizeCalibration ?? 1)
     return {
@@ -5369,6 +6480,9 @@ async function opOverlayFusion(ctx, args, signal) {
     problems,
     comp: 'Fusion 合成：MediaIn → Merge(背景) / Fish(Loader) → Xf1(Transform 关键帧) → Merge(前景) → MediaOut',
     keyframeCount: keyframes.length,
+    compName: finalCompName,
+    renameWarning,
+    deleteFailures,
     note: '原生 Fusion 贴图：图案走 alpha 合到原片段上，不改原素材、不生成替换视频',
   }
 }
@@ -5674,6 +6788,7 @@ const OPS = {
   'edit.story': opEditStory,
   'export.check': opExportCheck,
   'media.import': opMediaImport,
+  'frame.source': opFrameSource,
   'preview.render': opPreviewRender,
   'preview.live': (ctx, args, signal) => withDeadline(opPreviewLive(ctx, args, signal), 25_000, '预览超时（25s）：源素材抽帧或 Resolve 导出过慢，请先设置入出点后重试'),
   'preview.capabilities': opPreviewCapabilities,
@@ -5683,6 +6798,13 @@ const OPS = {
   'lut.ensure': opLutEnsure,
   'lut.acquire': opLutAcquire,
   'texture.mist': opTextureMist,
+  'video.sourcePreview': opVideoSourcePreview,
+  'features.get': opFeaturesGet,
+  'features.set': opFeaturesSet,
+  'alpha.sources': opAlphaSources,
+  'alpha.composite': opAlphaComposite,
+  'video.cutout': opVideoCutout,
+  'overlay.quick': opOverlayQuick,
   'overlay.fusion': opOverlayFusion,
   'erase.fusion': opEraseFusion,
   'mask.verify': opMaskVerify,
@@ -5705,6 +6827,8 @@ const OPS = {
   'grade.nodeReport': opGradeNodeReport,
   'style.oneClick': opStyleOneClick,
   'style.catalog': async (ctx, args, signal) => { const { listStyles } = await importFresh('lib/stylelib.mjs'); return { ok: true, styles: listStyles() } },
+  'export.qc': opExportQc,
+  'vision.probe': opVisionProbe,
   'render.deliver': opRenderDeliver,
   'resolve.background': opResolveBackground,
   'pipeline.oneClickFix': opPipelineOneClickFix,

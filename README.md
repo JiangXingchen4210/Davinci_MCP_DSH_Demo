@@ -1,4 +1,4 @@
-# davinci-console（0.11.25 · DEMO）
+# davinci-console（0.12.1 · DEMO）
 
 ![npm](https://img.shields.io/npm/v/davinci-console-demo?label=npm)
 ![demo](https://img.shields.io/badge/status-DEMO-orange)
@@ -7,7 +7,7 @@
 
 DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在浏览器面板里完成「素材 → 还原 → 调色/风格 → 交付」的完整流程，所有动作通过 **Resolve MCP** 驱动本机 DaVinci Resolve Studio。
 
-> ⚠️ 这是 **Demo 版（0.11.25）**：核心链路已可用，擦除（erase）等实验功能明确标记 DEMO/禁用；请在真实交付前自行复核画面。
+> ⚠️ 这是 **Demo 版（0.12.1）**：核心链路已可用，擦除（erase）等实验功能明确标记 DEMO/禁用；请在真实交付前自行复核画面。
 
 ## 功能
 
@@ -16,7 +16,7 @@ DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在�
 - **三层 15 节点调色图**：每节点一个工具（还原/白平衡/曝光/对比/曲线/色相/饱和/分离色调/肤色键/背景键/风格 LUT/质感），`grade.nodeReport` 逐节点说明作用
 - **风格库（10 个，带出处）**：青橙、漂白旁路、矩阵绿、银翼杀手 2049、夜魔侠暗黑、韦斯·安德森粉彩、月光蓝、疯狂麦克斯·铬版、教父琥珀、柯达 2383；一键应用，配方逐组写入并读回校验
 - **质感**：黑柔/白柔（Fusion Glow）、颗粒意图、可选胶片模拟 LUT
-- **局部**：抠像、面部跟踪、遮罩校验、透视跟踪、擦除（DEMO）
+- **局部**：静态抠像演示、视频级 alpha 合成、RVM 时域抠像+深度遮挡（需本地模型）、面部跟踪、遮罩校验、透视跟踪、擦除（DEMO）
 - **交付**：先选长宽/帧率/码率生成方案，**用户确认后才渲染**
 - **调试日志**：面板内逐条中文显示「阶段 / 节点 / 工具 / 目的 / 参数」
 
@@ -28,6 +28,7 @@ DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在�
 | DaVinci Resolve Studio | 建议 21.2；需可被 Resolve MCP 连接 |
 | Resolve MCP | 工具名 `resolve_*`（DSH 中启用对应 MCP 插件） |
 | ffmpeg / ffprobe | `brew install ffmpeg`，用于分析/抽帧/导出 |
+| 视频级抠像（可选） | 默认关闭；在面板「功能开关」启用后自动安装 Python venv + RVM/Depth ONNX 模型（约 278MB 本地运行时 + 60MB 模型） |
 
 面板启动时会自动检测以上依赖，缺什么会在顶部提示。
 
@@ -35,7 +36,7 @@ DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在�
 
 ```bash
 # DSH 市场/包安装
-npm install davinci-console-demo@0.11.25
+npm install davinci-console-demo@0.12.1
 # 或在 DSH 的插件管理中按包名安装后启用
 ```
 

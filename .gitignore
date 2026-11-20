@@ -13,3 +13,5 @@ docs/color-pipeline-notes-src/.cache
 
 # 第三方 LUT 本体（授权原因不入库，仅保留清单）
 assets/luts/official/dji/
+.matting/
+scripts/__pycache__/
