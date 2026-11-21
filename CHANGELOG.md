@@ -1,3 +1,8 @@
+## 0.13.1 — Vibe 单入口兼容非 RCM 项目
+
+- **非色彩管理项目**：`vibe.apply` 在项目不是 RCM 时先对每个片段调用 `camera.fix`，把 LOG→709 LUT 挂到 Node1，再建基础校正/风格/镜头匹配；RCM 项目仍由项目输入变换接管，不重复挂 LUT
+- **回归**：44/44 pass；RCM 与非 RCM 两条路径共用同一单入口
+
 ## 0.13.0 — Vibe Color 单入口、输入色彩空间审计、LUT 输入域校验
 
 - **Vibe Color 单入口**：`vibe.apply` 把「逐片段 Input Color Space 审计/修正 → 基础三层校正 → 独立风格 LUT 节点 → 末尾 CDL 镜头亮度匹配」串成一次调用；面板「理解并执行」直接走它

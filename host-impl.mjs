@@ -2894,6 +2894,18 @@ async function opVibeApply(ctx, args, signal) {
   const audit = await opInputAudit(ctx, { fix: true }, signal)
   const items = await listVideoItems(ctx, signal, 1)
   if (!items.length) throw new Error('当前时间线没有视频片段')
+  // 非 RCM 项目没有项目级输入变换：先把内置 LOG→709 LUT 挂到 Node1，再建风格图。
+  const restore = []
+  if (!audit?.project?.managed) {
+    for (const item of items) {
+      try {
+        const fixed = await opCameraFix(ctx, { itemId: item.id, nodeIndex: 1 }, signal)
+        restore.push({ itemId: item.id, name: item.name, ok: Boolean(fixed?.ok), applied: Boolean(fixed?.applied), lut: fixed?.lut ?? null, error: fixed?.error ?? null, note: fixed?.note ?? null })
+      } catch (error) {
+        restore.push({ itemId: item.id, name: item.name, ok: false, error: messageOf(error) })
+      }
+    }
+  }
   const warm = /暖|温暖|秋日|夕阳|金黄|amber|warm/i.test(text)
   const cool = /冷|青|蓝|清爽|teal|cool/i.test(text)
   const film = /胶片|电影|菲林|film|cinematic/i.test(text)
@@ -2972,6 +2984,7 @@ async function opVibeApply(ctx, args, signal) {
     intent: { warm, cool, film },
     recipe,
     inputAudit: audit,
+    restore: restore.length ? restore : undefined,
     applied,
     stylePlan: { generatedLook: useGeneratedLook && !externalStyleLut, externalLut: externalStyleLut, preset: externalStyleLut ? null : stylePreset, strength: externalStyleLut ? null : styleStrength, externalDomain: styleDomain },
     shotMatch,
@@ -7245,7 +7258,7 @@ async function opFeedbackIssue(ctx, args, signal) {
     '',
     '### 环境',
     '```json',
-    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.13.0' }, null, 2),
+    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.13.1' }, null, 2),
     '```',
     '',
     '### 调试日志（最近）',

@@ -6,7 +6,7 @@
 |---|---|
 | 插件名称 | davinci-console（达芬奇调色控制台） |
 | npm 包名 | `davinci-console-demo` |
-| 版本 | 0.13.0（DEMO） |
+| 版本 | 0.13.1（DEMO） |
 | 类型 | DSH Web 插件（bundle + client panel） |
 | 平台 | macOS（`os: darwin`） |
 | 许可证 | MIT |
@@ -57,9 +57,9 @@
 
 ```bash
 # 安装（市场或按包名）
-plugin_manager install_bundle target=davinci-console-demo@0.13.0
+plugin_manager install_bundle target=davinci-console-demo@0.13.1
 # 或 npm
-npm install davinci-console-demo@0.13.0
+npm install davinci-console-demo@0.13.1
 ```
 
 验证步骤：
@@ -86,8 +86,8 @@ npm install davinci-console-demo@0.13.0
 
 ## 七、提交清单
 
-- [x] npm 包已发布（0.13.0，latest）
-- [x] GitHub 仓库 + tag `v0.13.0`
+- [x] npm 包已发布（0.13.1，latest）
+- [x] GitHub 仓库 + tag `v0.13.1`
 - [x] README / USER_MANUAL / LICENSE
 - [x] 依赖自检与平台守卫
 - [x] 市场要求的截图/GIF：

@@ -1,6 +1,6 @@
 {
   "name": "davinci-console-demo",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "private": false,
   "description": "[DEMO] DaVinci Resolve 调色/剪辑控制台：Vibe Color 单入口（输入审计/基础校正/镜头匹配/独立风格）、灰片还原与官方 LUT 匹配、三层节点调色、10 个风格、交付审批。需要 macOS + DaVinci Resolve Studio + Resolve MCP。",
   "type": "module",
