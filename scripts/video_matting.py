@@ -64,6 +64,12 @@ def run_rvm(args):
     rec_names = sorted([n for n in inputs if n.startswith('r') and n.endswith('i')], key=lambda n: int(''.join(c for c in n if c.isdigit()) or 0))
     rec = {name: np.zeros([1, 1, 1, 1], np.float32) for name in rec_names}
     has_ratio = 'downsample_ratio' in inputs
+    warmup = max(0, int(args.warmup))
+    if warmup >= len(frames):
+        raise SystemExit(f'warmup {warmup} >= frames {len(frames)}')
+    prev_output_alpha = None
+    iou_values = []
+    written = 0
 
     for idx, frame_path in enumerate(frames):
         full = load_rgb(frame_path)
@@ -91,24 +97,49 @@ def run_rvm(args):
         if boxes:
             box = boxes[idx] if idx < len(boxes) else boxes[-1]
             x, y, w, h = [int(round(box[k])) for k in ('x', 'y', 'w', 'h')]
-            pad = int(max(w, h) * 0.22)
+            pad = int(max(w, h) * float(args.gate_padding))
             x0, y0 = max(0, x - pad), max(0, y - pad)
             x1, y1 = min(full.shape[1], x + w + pad), min(full.shape[0], y + h + pad)
             gate = np.zeros_like(alpha, dtype=np.float32)
             gate[y0:y1, x0:x1] = 1.0
             gate = cv2.GaussianBlur(gate, (0, 0), sigmaX=16)
             alpha = alpha * gate
+        # 时域一致性：只比较正式输出帧之间的相邻 alpha IoU；warmup 帧只喂状态，
+        # 不进入统计（否则 first3 会被 warmup 内部跳变污染）。
+        if idx < warmup:
+            for name in rec_names:
+                out_name = name[:-1] + 'o'
+                if out_name in named:
+                    rec[name] = named[out_name]
+            continue
         rgba = np.zeros((full.shape[0], full.shape[1], 4), np.uint16)
         rgba[..., :3] = (np.clip(fg[:, :, ::-1], 0, 1) * 255.0).astype(np.float32).astype(np.uint16) * 257
         rgba[..., 3] = np.clip(alpha, 0, 1).astype(np.float32) * 65535
-        out = os.path.join(args.out, f'frame-{idx:04d}.png')
+        out = os.path.join(args.out, f'frame-{written:04d}.png')
         if not cv2.imwrite(out, rgba):
             raise RuntimeError(f'write failed: {out}')
+        if prev_output_alpha is not None:
+            a = prev_output_alpha > 0.5
+            b = alpha > 0.5
+            union = int(np.logical_or(a, b).sum())
+            inter = int(np.logical_and(a, b).sum())
+            if union > 0:
+                iou_values.append(inter / union)
+        prev_output_alpha = alpha
+        written += 1
         for name in rec_names:
             out_name = name[:-1] + 'o'
             if out_name in named:
                 rec[name] = named[out_name]
-    print(json.dumps({'ok': True, 'frames': len(frames), 'out': args.out}))
+    stats = {
+        'count': len(iou_values),
+        'mean': float(sum(iou_values) / len(iou_values)) if iou_values else None,
+        'min': float(min(iou_values)) if iou_values else None,
+        'first3': [round(v, 4) for v in iou_values[:3]],
+        'first3Mean': float(sum(iou_values[:3]) / len(iou_values[:3])) if iou_values[:3] else None,
+        'lowFrames': [{'index': i, 'iou': round(v, 4)} for i, v in enumerate(iou_values) if v < 0.95][:20],
+    }
+    print(json.dumps({'ok': True, 'frames': written, 'warmup': warmup, 'out': args.out, 'temporalIoU': stats}))
 
 
 def run_occlude(args):
@@ -192,6 +223,8 @@ def main():
     r.add_argument('--model', required=True)
     r.add_argument('--downsample', type=float, default=0.375)
     r.add_argument('--refine', action='store_true')
+    r.add_argument('--warmup', type=int, default=0)
+    r.add_argument('--gate-padding', type=float, default=0.15)
     d = sub.add_parser('depth')
     d.add_argument('--frames', required=True)
     d.add_argument('--out', required=True)

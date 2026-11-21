@@ -1,3 +1,14 @@
+## 0.13.0 — Vibe Color 单入口、输入色彩空间审计、LUT 输入域校验
+
+- **Vibe Color 单入口**：`vibe.apply` 把「逐片段 Input Color Space 审计/修正 → 基础三层校正 → 独立风格 LUT 节点 → 末尾 CDL 镜头亮度匹配」串成一次调用；面板「理解并执行」直接走它
+- **Panasonic V-Log 识别修复**：读取 `com.panasonic.Semi-Pro.metadata.xml` 的 `CaptureGamma=V-Log` / `CaptureGamut=V-Gamut`，覆盖容器错误的 `bt709` 标签；`camera.detect` 返回 `Panasonic V-Gamut/V-Log`，`raw.apply` 能拿到 `panasonic-vlog`
+- **片段级 Input Color Space 审计**：新增 `input.audit`，逐条检查并修正导入素材被自动标成 `Rec.709-A` 的片段，避免项目 RCM 的 V-Log 默认值被覆盖
+- **LUT 输入域校验**：新增 `lib/lut_domain.mjs`，按 `.cube` 文件头 `Input:/Display:` 判定输入域；`Rec709 Kodak 2383` 的标题含 Rec709 但 Input 是 Cineon Log，会判为 log 并拒绝直接挂到 Rec.709 输出后
+- **镜头匹配**：`grade.shotMatch` 改为按实际节点数选择末尾空节点，兼容 11/15 节点图；Vibe 单入口实测两段 meanLuma 均落到 0.530 左右
+- **独立风格**：风格节点与基础校正分离，可由 `styleStrength` 调整；生成 look LUT 明确标记 `Rec.709 display in -> Rec.709 display out`
+- **保留失败记录**：DRX 能读回 44/44 项 Qualifier 参数，但 Node10–13 在独立渲染中仍无像素差异（有/无局部键两版逐字节一致）；Vibe 单入口默认 `localKeys:false`，不把局部键计入成功
+- **测试**：新增 Panasonic 私有元数据测试、LUT 输入域测试；`npm test` 44/44 pass
+
 # CHANGELOG
 
 ## 0.12.2 — 通过 GitHub Actions Trusted Publisher 发布（启用 npm provenance）

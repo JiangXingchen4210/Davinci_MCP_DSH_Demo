@@ -1,4 +1,4 @@
-# davinci-console（0.12.2 · DEMO）
+# davinci-console（0.13.0 · DEMO）
 
 ![npm](https://img.shields.io/npm/v/davinci-console-demo?label=npm)
 ![demo](https://img.shields.io/badge/status-DEMO-orange)
@@ -7,12 +7,13 @@
 
 DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在浏览器面板里完成「素材 → 还原 → 调色/风格 → 交付」的完整流程，所有动作通过 **Resolve MCP** 驱动本机 DaVinci Resolve Studio。
 
-> ⚠️ 这是 **Demo 版（0.12.2）**：核心链路已可用，擦除（erase）等实验功能明确标记 DEMO/禁用；请在真实交付前自行复核画面。
+> ⚠️ 这是 **Demo 版（0.13.0）**：核心链路已可用，擦除（erase）等实验功能明确标记 DEMO/禁用；请在真实交付前自行复核画面。
 
 ## 功能
 
 - **工程预检**：项目设置、色彩科学、离线素材一次性体检；缺素材会拦住风格与渲染
 - **灰片还原**：先判断是否 LOG（画面统计）→ 读元数据识别机型/曲线 → 在 DaVinci 自带/官方库按曲线匹配；库里没有时给厂商官方页面，可粘贴直链自动下载安装（如 OPPO O-Log 已验证），或上传 `.cube`
+- **Vibe Color 单入口**：一句话描述目标 → 逐片段 Input Color Space 审计/修正 → 基础三层校正 → 独立风格 LUT 节点 → 末尾 CDL 镜头匹配；风格 LUT 先校验输入域，拒绝把 Cineon Log LUT 直接接在 RCM Rec.709 输出后
 - **三层 15 节点调色图**：每节点一个工具（还原/白平衡/曝光/对比/曲线/色相/饱和/分离色调/肤色键/背景键/风格 LUT/质感），`grade.nodeReport` 逐节点说明作用
 - **风格库（10 个，带出处）**：青橙、漂白旁路、矩阵绿、银翼杀手 2049、夜魔侠暗黑、韦斯·安德森粉彩、月光蓝、疯狂麦克斯·铬版、教父琥珀、柯达 2383；一键应用，配方逐组写入并读回校验
 - **质感**：黑柔/白柔（Fusion Glow）、颗粒意图、可选胶片模拟 LUT
@@ -36,9 +37,14 @@ DaVinci Resolve 的调色 / 剪辑控制台，作为 DSH Web 插件运行：在�
 
 ```bash
 # DSH 市场/包安装
-npm install davinci-console-demo@0.12.2
+npm install davinci-console-demo@0.13.0
 # 或在 DSH 的插件管理中按包名安装后启用
 ```
+
+### DSH 插件市场引导
+- 市场索引：<https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/blob/main/market-index.json>
+- 收录材料：[MARKET_SUBMISSION.md](./MARKET_SUBMISSION.md)、[MARKET_SUBMISSION_EMAIL.md](./MARKET_SUBMISSION_EMAIL.md)
+- 包名：`davinci-console-demo@0.13.0`（本版本通过 GitHub Actions + npm Trusted Publisher 发布，带 provenance）
 
 ## 使用（三步）
 
@@ -50,6 +56,7 @@ npm install davinci-console-demo@0.12.2
 
 ## 版本
 
+- 0.13.0（Demo）：Vibe Color 单入口；Panasonic 私有元数据 V-Log 识别；片段级 Input Color Space 审计/修正；LUT 输入域校验；镜头亮度匹配；独立风格节点
 - 0.11.0（Demo）：还原决策链路、15 节点图、风格库、交付审批、调试日志、依赖自检、内置 LUT 支持库（清单随包，LUT 本体因授权不随包发布）
 
 ## License

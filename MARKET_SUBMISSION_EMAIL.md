@@ -3,7 +3,7 @@
 ## 一、邮件版
 
 **收件人**：DSH 插件市场收录（请填官方邮箱）
-**主题**：申请收录插件「达芬奇调色控制台（davinci-console-demo）v0.11.0」
+**主题**：申请收录插件「达芬奇调色控制台（davinci-console-demo）v0.13.0」
 
 **正文**：
 
@@ -13,8 +13,8 @@
 
 【基本信息】
 - 插件名：davinci-console（达芬奇调色控制台）
-- npm 包：davinci-console-demo@0.11.0（latest）
-- 版本形态：0.11.0 DEMO
+- npm 包：davinci-console-demo@0.13.0（latest）
+- 版本形态：0.13.0 DEMO
 - 许可证：MIT
 - 仓库：https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo
 - npm：https://www.npmjs.com/package/davinci-console-demo
@@ -62,7 +62,7 @@
 
 ## 二、GitHub Issue 版（可直接粘贴）
 
-**标题**：`[市场收录] davinci-console-demo v0.11.0 — DaVinci Resolve 调色控制台（DEMO）`
+**标题**：`[市场收录] davinci-console-demo v0.13.0 — DaVinci Resolve 调色控制台（DEMO）`
 
 **正文**：
 
@@ -70,7 +70,7 @@
 | 项 | 内容 |
 |---|---|
 | 名称 | davinci-console（达芬奇调色控制台） |
-| npm | `davinci-console-demo@0.11.0` |
+| npm | `davinci-console-demo@0.13.0` |
 | 许可证 | MIT |
 | 平台 | macOS |
 | 仓库 | https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo |
@@ -97,7 +97,7 @@
 
 ### 安装验证
 ```bash
-plugin_manager install_bundle target=davinci-console-demo@0.11.0
+plugin_manager install_bundle target=davinci-console-demo@0.13.0
 ```
 1. 打开侧边栏「达芬奇」面板
 2. 确认顶部依赖自检（MCP/ffmpeg/Resolve.app）

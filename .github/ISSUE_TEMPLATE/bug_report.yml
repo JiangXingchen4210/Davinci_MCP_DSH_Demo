@@ -22,7 +22,7 @@ body:
       label: 环境（插件「反馈/报错」按钮会自动带上）
       render: json
       placeholder: |
-        {"platform":"darwin","mcp":{"ok":true},"binaries":{"ffmpeg":"/opt/homebrew/bin/ffmpeg"},"pluginVersion":"0.11.0"}
+        {"platform":"darwin","mcp":{"ok":true},"binaries":{"ffmpeg":"/opt/homebrew/bin/ffmpeg"},"pluginVersion":"0.13.0"}
   - type: textarea
     id: log
     attributes:

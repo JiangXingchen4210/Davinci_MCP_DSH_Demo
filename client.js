@@ -297,25 +297,34 @@ window.__ModuleLoader__.load({
         'fx.overlayApply': '叠加到当前片段',
         'fx.overlayHint': '叠加使用当前播放头所在片段；先在时间线把播放头放到目标片段，再点此按钮。',
         'alpha.videoTitle': '① 带 alpha 通道的视频 → 合成',
-        'alpha.videoHint': '导入 ProRes 4444 / PNG 序列等本身带 alpha 的视频，作为随时间播放的前景，叠到当前播放头片段同一时间点；保持时长/帧率/透明。',
+        'alpha.videoHint': '导入 ProRes 4444 / PNG 序列等本身带 alpha 的视频，作为随时间播放的前景，叠到显式选中的 V1 目标片段同一时间点；保持时长/帧率/透明。',
         'alpha.composite': '导入并叠加',
-        'alpha.cutoutTitle': '② 普通视频 → RVM 时域抠像（跟踪框 + 深度遮挡）',
-        'alpha.cutoutHint': '从媒体池选源视频：RVM 时域抠像 + 跟踪框门限 + 深度遮挡，生成 1920×1080 / 16-bit alpha / ProRes 4444 再叠到 V2。跟踪框用于 mask 空间门限，不是多目标实例分割；深度遮挡是单目深度估计，需抽帧复核；任一帧失败会明确报错。',
+        'alpha.upload': '上传 alpha 视频（≤20MB；大文件未完成，请用本机路径/媒体池）',
+        'alpha.uploaded': '已上传：',
+        'alpha.uploadTooBig': '文件超过 20MB 上传上限；请用媒体池或本机路径：',
+        'alpha.cutoutTitle': '② 普通视频 → RVM 时域抠像 / 跟踪（深度遮挡暂不可用）',
+        'alpha.cutoutHint': '从媒体池选源视频：RVM 时域抠像 + 跟踪框门限，生成 1920×1080 / 16-bit alpha / ProRes 4444 再叠到 V2。跟踪框用于 mask 空间门限，不是多目标实例分割；深度遮挡当前不可用（任何 depthOcclusion 请求会被拒绝），不要再按深度遮挡验收。',
         'alpha.sources': '读取媒体池',
         'alpha.refreshSources': '刷新源列表',
         'alpha.pickSource': '选择源视频',
-        'alpha.pickAlphaClip': '从媒体池选择带 alpha 的视频（或直接填路径）',
-        'alpha.target': '目标片段（当前播放头）',
+        'alpha.pickAlphaClip': '从媒体池选择带 alpha 的视频（或填本机路径，不是上传）',
+        'alpha.target': '目标片段（V1 显式选择）',
+        'alpha.targetCard': '目标：显式选择 V1 片段（不跟播放头走）',
+        'alpha.targetHint': '目标从 V1 片段列表选择，不会因为播放头停在 V2 alpha 上而变成 alpha.mov。',
+        'alpha.targetPick': '选择 V1 目标片段',
+        'alpha.targetsRefresh': '刷新目标列表',
+        'alpha.targetsLoad': '读取 V1 目标',
+        'alpha.visualLimits': '视觉边界：当前只是 2D 合成，没有接触阴影、没有光色匹配、没有真实前后遮挡；不能当电影视效成片。',
         'alpha.duration': '时长(s)',
         'alpha.fps': '采样fps',
         'alpha.cutout': '生成并叠加',
         'alpha.mode': '模式',
         'alpha.frames': '帧数',
-        'alpha.noTracking': 'RVM 时域抠像 + 跟踪框门限；深度遮挡是估计值，不是逐像素真值。',
+        'alpha.noTracking': 'RVM 时域抠像 + 跟踪框门限；深度遮挡当前不可用（逐帧深度归一化不可比较）。',
         'alpha.previewAt': '预览帧',
         'alpha.previewSource': '预览源首帧',
         'feature.title': '功能开关：视频级抠像（可选）',
-        'feature.hint': '默认关闭，关闭时「视频抠像/合成」界面完全隐藏。启用会创建一个本地 Python venv，安装 onnxruntime/numpy/opencv，并下载 RVM + Depth Anything V2 模型（约 60MB+，需联网，首次可能几分钟）。',
+        'feature.hint': '默认关闭，关闭时「视频抠像/合成」界面完全隐藏。启用会创建本地 Python venv，安装 onnxruntime/numpy/opencv，并下载 RVM 时域抠像模型（深度遮挡当前不启用，不下载 Depth 模型）。',
         'feature.enable': '启用并自动安装',
         'feature.disable': '关闭并隐藏界面',
         'feature.status': '重新检测',
@@ -650,25 +659,34 @@ window.__ModuleLoader__.load({
         'fx.overlayApply': 'Overlay on current clip',
         'fx.overlayHint': 'Overlays on the clip under the playhead; put the playhead on the target clip first.',
         'alpha.videoTitle': '① Alpha-channel video → composite',
-        'alpha.videoHint': 'Imports a video that already has alpha (ProRes 4444 / PNG sequence) and lays it over the clip under the playhead, preserving duration, fps and transparency.',
+        'alpha.videoHint': 'Imports a video that already has alpha (ProRes 4444 / PNG sequence) and lays it over the explicitly selected V1 target clip, preserving duration, fps and transparency.',
         'alpha.composite': 'Import and overlay',
-        'alpha.cutoutTitle': '② Ordinary video → RVM temporal matte (tracked gate + depth occlusion)',
-        'alpha.cutoutHint': 'RVM temporal matte + tracked box gate + depth occlusion; writes 1920x1080 16-bit alpha ProRes 4444 to V2. The tracked box gates the mask, not a multi-instance subject segmentation; depth occlusion is estimated and needs frame review; any failed frame fails loudly.',
+        'alpha.upload': 'Upload alpha video (≤20MB; large upload not implemented, use local path/Media Pool)',
+        'alpha.uploaded': 'Uploaded:',
+        'alpha.uploadTooBig': 'File exceeds the 20MB upload limit; use Media Pool or a local path:',
+        'alpha.cutoutTitle': '② Ordinary video → RVM temporal matte / tracking (depth occlusion unavailable)',
+        'alpha.cutoutHint': 'RVM temporal matte + tracked box gate; writes 1920x1080 16-bit alpha ProRes 4444 to V2. The tracked box gates the mask, not a multi-instance subject segmentation. Depth occlusion is currently unavailable: any depthOcclusion request is rejected, so do not accept it by depth ordering.',
         'alpha.sources': 'Load Media Pool',
         'alpha.refreshSources': 'Refresh sources',
         'alpha.pickSource': 'Pick source clip',
         'alpha.pickAlphaClip': 'Pick an alpha video from the Media Pool (or type a path)',
-        'alpha.target': 'Target clip (under playhead)',
+        'alpha.target': 'Target (explicit V1 selection)',
+        'alpha.targetCard': 'Target: explicit V1 clip (not playhead-driven)',
+        'alpha.targetHint': 'Pick the target from V1; the playhead sitting on a V2 alpha clip cannot turn the target into alpha.mov.',
+        'alpha.targetPick': 'Pick V1 target clip',
+        'alpha.targetsRefresh': 'Refresh targets',
+        'alpha.targetsLoad': 'Load V1 targets',
+        'alpha.visualLimits': 'Visual limits: 2D composite only; no contact shadows, no light/color matching, no true occlusion. Not cinematic VFX delivery.',
         'alpha.duration': 'Duration (s)',
         'alpha.fps': 'Sample fps',
         'alpha.cutout': 'Generate and overlay',
         'alpha.mode': 'Mode',
         'alpha.frames': 'Frames',
-        'alpha.noTracking': 'RVM temporal matte + tracked box gate; depth occlusion is estimated, not ground truth.',
+        'alpha.noTracking': 'RVM temporal matte + tracked box gate; depth occlusion is unavailable.',
         'alpha.previewAt': 'Preview frame',
         'alpha.previewSource': 'Preview source frame',
         'feature.title': 'Optional feature: video matting',
-        'feature.hint': 'Off by default; the Video alpha UI is hidden while off. Enabling creates a local Python venv, installs onnxruntime/numpy/opencv and downloads RVM + Depth Anything V2 (60MB+, network required; first run may take minutes).',
+        'feature.hint': 'Off by default; the Video alpha UI is hidden while off. Enabling creates a local Python venv, installs onnxruntime/numpy/opencv and downloads the RVM temporal matte model (depth model not downloaded; depth occlusion unavailable).',
         'feature.enable': 'Enable and auto-install',
         'feature.disable': 'Disable and hide UI',
         'feature.status': 'Re-check',
@@ -1130,10 +1148,14 @@ window.__ModuleLoader__.load({
       const [overlayResult, setOverlayResult] = React.useState(null)
       const [alphaSources, setAlphaSources] = React.useState([])
       const [alphaVideoPath, setAlphaVideoPath] = React.useState('')
+      const [alphaUploadName, setAlphaUploadName] = React.useState('')
       const [alphaVideoClipId, setAlphaVideoClipId] = React.useState('')
       const [videoSourceClipId, setVideoSourceClipId] = React.useState('')
+      const [videoTargets, setVideoTargets] = React.useState([])
+      const [videoTimelineName, setVideoTimelineName] = React.useState('')
+      const [videoTargetId, setVideoTargetId] = React.useState('')
       const [videoCutoutDuration, setVideoCutoutDuration] = React.useState(2)
-      const [videoCutoutFps, setVideoCutoutFps] = React.useState(12)
+      const [videoCutoutFps, setVideoCutoutFps] = React.useState(24)
       const [alphaCompositeResult, setAlphaCompositeResult] = React.useState(null)
       const [videoCutoutResult, setVideoCutoutResult] = React.useState(null)
       const [sourcePreview, setSourcePreview] = React.useState(null)
@@ -1454,6 +1476,23 @@ window.__ModuleLoader__.load({
         if (value?.clips) setAlphaSources(value.clips)
       }, [run, t])
 
+      const loadVideoTargets = React.useCallback(async () => {
+        const value = await run('video.targets', {}, t('alpha.targetsLoad'))
+        if (value?.ok === false) return
+        const targets = Array.isArray(value?.targets) ? value.targets : []
+        setVideoTargets(targets)
+        if (value?.timeline?.name) setVideoTimelineName(value.timeline.name)
+        setVideoTargetId((current) => {
+          if (targets.some((entry) => entry.id === current)) return current
+          if (targets.some((entry) => entry.id === itemId)) return itemId
+          return targets[0]?.id ?? ''
+        })
+      }, [run, t, itemId])
+
+      React.useEffect(() => {
+        if (tab === 'videoAlpha' && features.videoMatting) void loadVideoTargets()
+      }, [tab, features.videoMatting, loadVideoTargets])
+
       React.useEffect(() => {
         if (tab === 'videoAlpha' && !alphaSourcesLoadedRef.current) {
           alphaSourcesLoadedRef.current = true
@@ -1494,20 +1533,44 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const compositeAlphaVideo = async () => {
-        if (!alphaVideoPath.trim()) return
-        const value = await run('alpha.composite', { filePath: alphaVideoPath.trim(), targetItemId: itemId }, t('alpha.composite'))
+      const compositeAlphaVideo = async (upload) => {
+        const payload = { targetItemId: videoTargetId }
+        if (upload?.dataUrl) {
+          payload.dataUrl = upload.dataUrl
+          payload.fileName = upload.fileName ?? 'alpha-upload.mov'
+        } else {
+          if (!alphaVideoPath.trim()) return
+          payload.filePath = alphaVideoPath.trim()
+        }
+        const value = await run('alpha.composite', payload, t('alpha.composite'))
         if (value) setAlphaCompositeResult(value)
       }
 
+      const pickAlphaUpload = async (file) => {
+        if (!file) return
+        if (file.size > 20 * 1024 * 1024) {
+          setError(`${t('alpha.uploadTooBig')} ${(file.size / 1024 / 1024).toFixed(1)}MB`)
+          return
+        }
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result ?? ''))
+          reader.onerror = () => reject(new Error('读取文件失败'))
+          reader.readAsDataURL(file)
+        }).catch((cause) => { setError(String(cause?.message ?? cause)); return null })
+        if (!dataUrl) return
+        setAlphaUploadName(file.name)
+        await compositeAlphaVideo({ dataUrl, fileName: file.name })
+      }
+
       const runVideoCutout = async () => {
-        if (!itemId || !videoSourceClipId) return
+        if (!videoTargetId || !videoSourceClipId) return
         const value = await run('video.cutout', {
           sourceClipId: videoSourceClipId,
-          targetItemId: itemId,
+          targetItemId: videoTargetId,
           durationSec: Number(videoCutoutDuration) || 2,
-          fps: Number(videoCutoutFps) || 12,
-          maxFrames: Math.min(48, Math.max(2, Math.round((Number(videoCutoutDuration) || 2) * (Number(videoCutoutFps) || 12)))),
+          fps: Number(videoCutoutFps) || 24,
+          maxFrames: Math.min(240, Math.max(2, Math.round((Number(videoCutoutDuration) || 2) * (Number(videoCutoutFps) || 24)))),
           // 不传 width：由 host 按目标时间线原生分辨率处理，避免 UI 又把 1920 缩回 960
           subjectBox: subjectBox || undefined,
         }, t('alpha.cutout'))
@@ -1797,7 +1860,9 @@ window.__ModuleLoader__.load({
 
       const runCommand = async (execute) => {
         if (!commandText.trim()) return
-        const value = await run('vibe.run', { text: commandText, itemId, execute: execute === true }, t(execute ? 'cmd.runExecute' : 'cmd.run'))
+        const value = execute === true
+          ? await run('vibe.apply', { text: commandText }, t('cmd.runExecute'))
+          : await run('vibe.run', { text: commandText, itemId }, t('cmd.run'))
         if (value) setCommandResult(value)
       }
 
@@ -3235,6 +3300,23 @@ window.__ModuleLoader__.load({
         null,
         h(
           Card,
+          { title: t('alpha.targetCard') },
+          h('div', { style: S.buttons },
+            h('select', {
+              value: videoTargetId,
+              onChange: (event) => setVideoTargetId(event.target.value),
+              style: S.select,
+            },
+              h('option', { value: '' }, t('alpha.targetPick')),
+              videoTargets.map((target) => h('option', { key: target.id, value: target.id }, `${target.name} · ${target.start}–${target.end}`)),
+            ),
+            h(Button, { onClick: loadVideoTargets, disabled: working }, t('alpha.targetsRefresh')),
+          ),
+          h('div', { style: S.hint }, t('alpha.targetHint')),
+          h('div', { style: S.hint }, t('alpha.visualLimits')),
+        ),
+        h(
+          Card,
           { title: t('alpha.videoTitle') },
           h('div', { style: S.hint }, t('alpha.videoHint')),
           h('div', { style: S.buttons },
@@ -3244,7 +3326,11 @@ window.__ModuleLoader__.load({
               placeholder: '/path/to/alpha.mov（ProRes 4444 / 带 alpha）',
               style: { ...S.input, flex: 1, minWidth: 260 },
             }),
-            h(Button, { variant: 'primary', onClick: compositeAlphaVideo, disabled: working || !itemId || !alphaVideoPath.trim() }, t('alpha.composite')),
+            h(Button, { variant: 'primary', onClick: () => compositeAlphaVideo(), disabled: working || !videoTargetId || !alphaVideoPath.trim() }, t('alpha.composite')),
+            h('label', { style: { ...S.buttons, cursor: 'pointer', fontSize: 12.5 } },
+              alphaUploadName ? `${t('alpha.uploaded')} ${alphaUploadName}` : t('alpha.upload'),
+              h('input', { type: 'file', accept: 'video/*', style: { display: 'none' }, onChange: (event) => { const f = event.target.files?.[0]; event.target.value = ''; if (f) void pickAlphaUpload(f) } }),
+            ),
           ),
           h('div', { style: S.buttons },
             h('select', {
@@ -3266,7 +3352,7 @@ window.__ModuleLoader__.load({
                 alphaCompositeResult.ok === false
                   ? h('div', { style: S.error }, alphaCompositeResult.error ?? '失败')
                   : h('div', null,
-                      h('div', { style: S.hint }, `alpha: ${alphaCompositeResult.alpha?.codec ?? ''} ${alphaCompositeResult.alpha?.pixFmt ?? ''} · ${alphaCompositeResult.alpha?.frames ?? '—'} 帧 / ${alphaCompositeResult.alpha?.durationSec ?? '—'}s · fps ${alphaCompositeResult.alpha?.fps ?? '—'}`),
+                      h('div', { style: S.hint }, `alpha: ${alphaCompositeResult.alpha?.codec ?? ''} ${alphaCompositeResult.alpha?.pixFmt ?? ''} · ${alphaCompositeResult.alpha?.frameCount ?? alphaCompositeResult.alpha?.frames ?? '—'} 帧 / ${alphaCompositeResult.alpha?.durationSec ?? '—'}s · fps ${alphaCompositeResult.alpha?.fps ?? '—'}`),
                       h('div', { style: S.hint }, `placed: ${String(alphaCompositeResult.placement?.placed)} · V2 items: ${alphaCompositeResult.placement?.v2Items ?? '—'} · sync: start ${alphaCompositeResult.sync?.recordFrame ?? '—'} / alpha ${alphaCompositeResult.sync?.alphaFrames ?? '—'}f / target ${alphaCompositeResult.sync?.targetFrames ?? '—'}f`),
                       alphaCompositeResult.normalization
                         ? h('div', { style: S.hint }, `归一化: ${alphaCompositeResult.normalization.from} → ${alphaCompositeResult.normalization.to} (${alphaCompositeResult.normalization.pixFmt})`)
@@ -3314,13 +3400,13 @@ window.__ModuleLoader__.load({
                 h('div', { style: S.hint }, subjectBox ? t('alpha.boxReady') : t('alpha.boxHint')),
               )
             : null,
-          h('div', { style: S.hint }, `${t('alpha.target')}: ${item?.name ?? '—'} / ${timeline?.name ?? '—'}`),
+          h('div', { style: S.hint }, `${t('alpha.target')}: ${videoTargets.find((entry) => entry.id === videoTargetId)?.name ?? '—'} / ${videoTimelineName || timeline?.name || '—'}`),
           h('div', { style: S.buttons },
             h('span', { style: S.hint }, t('alpha.duration')),
             h('input', { type: 'number', min: 0.5, max: 10, step: 0.5, value: videoCutoutDuration, onChange: (event) => setVideoCutoutDuration(Number(event.target.value) || 2), style: { ...S.input, width: 70 } }),
             h('span', { style: S.hint }, t('alpha.fps')),
-            h('input', { type: 'number', min: 2, max: 24, step: 1, value: videoCutoutFps, onChange: (event) => setVideoCutoutFps(Number(event.target.value) || 12), style: { ...S.input, width: 60 } }),
-            h(Button, { variant: 'primary', onClick: runVideoCutout, disabled: working || !itemId || !videoSourceClipId }, t('alpha.cutout')),
+            h('input', { type: 'number', min: 2, max: 24, step: 1, value: videoCutoutFps, onChange: (event) => setVideoCutoutFps(Number(event.target.value) || 24), style: { ...S.input, width: 60 } }),
+            h(Button, { variant: 'primary', onClick: runVideoCutout, disabled: working || !videoTargetId || !videoSourceClipId }, t('alpha.cutout')),
           ),
           videoCutoutResult
             ? h('div', null,

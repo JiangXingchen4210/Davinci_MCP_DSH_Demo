@@ -2633,6 +2633,61 @@ async function opCameraDetect(ctx, args, signal) {
  * - `lut` 路径：写内置 .cube，用 graph.set_lut 挂到 1 号节点（非管理项目的正确做法）
  * 关键护栏：识别为「非 LOG」时**拒绝** LUT（绝不把非灰片当灰片处理）。
  */
+/** 逐片段审计/修正 Input Color Space，避免导入后片段级 Rec.709-A 覆盖项目 RCM 的 V-Log 默认值。 */
+async function opInputAudit(ctx, args, signal) {
+  const trackIndex = Math.max(1, Number(args.trackIndex) || 1)
+  const items = await listVideoItems(ctx, signal, trackIndex)
+  const project = await settle(callTool(ctx, 'project_settings', { action: 'get_setting' }, signal))
+  const settings = project.ok ? (project.value?.settings ?? project.value ?? {}) : {}
+  const managed = /managed/i.test(String(settings.colorScienceMode ?? ''))
+  const rows = []
+  for (const item of items) {
+    try {
+      const { info } = await resolveItemContext(ctx, signal, item.id)
+      const clipId = info.clipId ?? null
+      const before = clipId
+        ? await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: clipId, key: 'Input Color Space' } }, signal))
+        : null
+      const beforeValue = before?.ok ? (before.value?.properties ?? before.value ?? null) : null
+      const detection = await opCameraDetect(ctx, { itemId: item.id }, signal)
+      const target = detection?.detection?.isLog && detection?.detection?.suggested?.inputColorSpace
+        ? String(detection.detection.suggested.inputColorSpace)
+        : null
+      let written = null
+      let afterValue = beforeValue
+      if (args.fix === true && managed && clipId && target) {
+        written = await settle(callTool(ctx, 'media_pool_item', { action: 'set_clip_property', params: { clip_id: clipId, key: 'Input Color Space', value: target } }, signal))
+        const after = await settle(callTool(ctx, 'media_pool_item', { action: 'get_clip_property', params: { clip_id: clipId, key: 'Input Color Space' } }, signal))
+        afterValue = after?.ok ? (after.value?.properties ?? after.value ?? null) : null
+      }
+      rows.push({
+        itemId: item.id,
+        name: item.name,
+        clipId,
+        camera: detection?.detection?.camera ?? null,
+        curve: detection?.detection?.tone?.verdict ?? null,
+        isLog: detection?.detection?.isLog ?? null,
+        confidence: detection?.detection?.confidence ?? null,
+        targetInputColorSpace: target,
+        beforeInputColorSpace: beforeValue,
+        afterInputColorSpace: afterValue,
+        written: Boolean(written?.ok && written.value?.success !== false),
+        writeError: written && !written.ok ? messageOf(written.error) : null,
+      })
+    } catch (error) {
+      rows.push({ itemId: item.id, name: item.name, error: messageOf(error) })
+    }
+  }
+  return {
+    ok: rows.every((row) => !row.error),
+    project: { mode: settings.colorScienceMode ?? null, input: settings.colorSpaceInput ?? null, managed },
+    trackIndex,
+    fix: args.fix === true,
+    rows,
+    note: 'project RCM 只给默认值；导入素材的 clip Input Color Space 可能被写成 Rec.709-A，必须逐条检查/修正。fix:true 才会写入。',
+  }
+}
+
 async function opRawApply(ctx, args, signal) {
   const fps = await projectFps(ctx, signal)
   const { item, info, clipProperties } = await resolveItemContext(ctx, signal, args.itemId)
@@ -2830,6 +2885,100 @@ const ROUTE_RULES = [
 /**
  * 自然语言 → 执行计划。默认只出计划（plan-only），execute:true 才真正调用（只调用非破坏性/自带版本保护的动作）。
  */
+/** 单入口 Vibe Color：输入审计/修正 → 基础三级调色 → 独立风格节点 → 镜头匹配。 */
+async function opVibeApply(ctx, args, signal) {
+  const text = String(args.text ?? '').trim()
+  if (!text) throw new Error('vibe.apply 需要 text（用户的一句话）')
+  const { writeLookLut } = await importFresh('lib/lookgen.mjs')
+  const { inspectLutDomain, lutCompatibleWithOutput } = await importFresh('lib/lut_domain.mjs')
+  const audit = await opInputAudit(ctx, { fix: true }, signal)
+  const items = await listVideoItems(ctx, signal, 1)
+  if (!items.length) throw new Error('当前时间线没有视频片段')
+  const warm = /暖|温暖|秋日|夕阳|金黄|amber|warm/i.test(text)
+  const cool = /冷|青|蓝|清爽|teal|cool/i.test(text)
+  const film = /胶片|电影|菲林|film|cinematic/i.test(text)
+  const recipe = {
+    exposure: warm ? 0.012 : 0.004,
+    contrast: film ? 1.055 : warm ? 1.04 : 1.025,
+    lift: film ? -0.006 : -0.002,
+    saturation: cool ? 0.92 : warm ? 0.98 : 0.96,
+    hue: warm ? 1.5 : cool ? -1 : 0,
+    splitShadow: warm ? { r: 1.015, g: 1.0, b: 0.985 } : { r: 0.995, g: 1.0, b: 1.012 },
+    splitHighlight: warm ? { r: 1.035, g: 1.0, b: 0.955 } : { r: 0.99, g: 1.0, b: 1.02 },
+    skinGain: 1.004,
+  }
+  let stylePreset = warm ? 'godfather' : cool ? 'teal-orange' : 'bleach'
+  let styleStrength = film ? 0.26 : 0.18
+  let styleDomain = null
+  let useGeneratedLook = true
+  let externalStyleLut = null
+  if (args.styleLutPath) {
+    try {
+      const inspection = await inspectLutDomain(String(args.styleLutPath))
+      const compatible = lutCompatibleWithOutput(inspection, 'rec709')
+      styleDomain = { inspection, compatible }
+      if (compatible.ok) externalStyleLut = String(args.styleLutPath)
+      useGeneratedLook = !compatible.ok
+    } catch (error) {
+      styleDomain = { error: messageOf(error) }
+    }
+  }
+  const applied = []
+  for (const item of items) {
+    let built = null
+    try {
+      built = await opGradeBuild3(ctx, {
+        itemId: item.id,
+        recipe,
+        skipStyleLut: true,
+        styleStrength: film ? 0.9 : 0.75,
+        localKeys: false,
+        consistency: { gain: 1, warmth: warm ? 0.006 : 0 },
+      }, signal)
+    } catch (error) {
+      applied.push({ itemId: item.id, name: item.name, ok: false, stage: 'build3', error: messageOf(error) })
+      continue
+    }
+    const lookNodeIndex = built?.nodeGraph?.num_nodes ? Math.max(1, Number(built.nodeGraph.num_nodes) - 1) : 14
+    let style = null
+    if (externalStyleLut) {
+      try {
+        const installed = await settle(callTool(ctx, 'lut', { action: 'install', name: `vibe-look-${stamp()}`, source_path: externalStyleLut, overwrite: true }, signal))
+        const lutPath = installed.ok ? (installed.value?.set_lut_path ?? externalStyleLut) : externalStyleLut
+        const set = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: lookNodeIndex, lut_path: lutPath, source: 'item', ...scopeOf(item.id) }, signal))
+        const read = await settle(callTool(ctx, 'graph', { action: 'get_lut', node_index: lookNodeIndex, source: 'item', ...scopeOf(item.id) }, signal))
+        style = { generated: false, external: true, preset: null, nodeIndex: lookNodeIndex, lutPath, setOk: Boolean(set.ok && set.value?.success !== false), readback: read.ok ? (read.value?.lut ?? read.value ?? null) : null, inputDomain: styleDomain?.inspection?.inputDomain ?? 'unknown' }
+      } catch (error) {
+        style = { generated: false, external: true, ok: false, error: messageOf(error) }
+      }
+    } else if (useGeneratedLook) {
+      try {
+        const written = await writeLookLut(stylePreset, await ensureDataDir('luts'), { strength: styleStrength })
+        const set = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: lookNodeIndex, lut_path: written.path, source: 'item', ...scopeOf(item.id) }, signal))
+        const read = await settle(callTool(ctx, 'graph', { action: 'get_lut', node_index: lookNodeIndex, source: 'item', ...scopeOf(item.id) }, signal))
+        style = { generated: true, preset: stylePreset, strength: styleStrength, nodeIndex: lookNodeIndex, lutPath: written.path, setOk: Boolean(set.ok && set.value?.success !== false), readback: read.ok ? (read.value?.lut ?? read.value ?? null) : null, inputDomain: 'rec709' }
+      } catch (error) {
+        style = { ok: false, error: messageOf(error) }
+      }
+    } else {
+      style = { generated: false, skipped: true, reason: '外部 LUT 输入域与 Rec.709 输出不兼容；已拒绝直接挂载，改用内置 look', domain: styleDomain }
+    }
+    applied.push({ itemId: item.id, name: item.name, ok: Boolean(built?.ok), build3: built, style })
+  }
+  const shotMatch = await opGradeShotMatch(ctx, { targetLuma: Number(args.targetLuma) || 0.5305 }, signal).catch((error) => ({ ok: false, error: messageOf(error) }))
+  return {
+    ok: applied.some((row) => row.ok) && shotMatch?.ok !== false,
+    text,
+    intent: { warm, cool, film },
+    recipe,
+    inputAudit: audit,
+    applied,
+    stylePlan: { generatedLook: useGeneratedLook && !externalStyleLut, externalLut: externalStyleLut, preset: externalStyleLut ? null : stylePreset, strength: externalStyleLut ? null : styleStrength, externalDomain: styleDomain },
+    shotMatch,
+    note: '单入口完成：逐片段输入审计/修正 → 基础三层调色 → 独立风格 LUT 节点 → 末尾 CDL 镜头亮度匹配；不使用外部脚本。',
+  }
+}
+
 async function opVibeRun(ctx, args, signal) {
   const text = String(args.text ?? '').trim()
   if (!text) throw new Error('vibe.run 需要 text（用户的一句话）')
@@ -4341,6 +4490,202 @@ async function opPreflightCheck(ctx, args, signal) {
 }
 
 /** 一键应用风格（大师风格库）：ARRI/LOG 还原 + 三层图 + 风格 LUT + 黑白柔。 */
+/** 把指定 .cube 挂到片段指定节点（真实 Film LUT），并读回节点实际挂载值。 */
+async function opFilmApply(ctx, args, signal) {
+  const { item } = await resolveItemContext(ctx, signal, args.itemId)
+  const lutPath = String(args.lutPath ?? '').trim()
+  if (!lutPath) throw new Error('film.apply 需要 lutPath')
+  const nodeIndex = Math.max(1, Number(args.nodeIndex) || 1)
+  const safeName = path.basename(lutPath).replace(/\.cube$/i, '').replace(/[^\w-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 50)
+  const installed = await settle(callTool(ctx, 'lut', { action: 'install', name: `film-${safeName}-${stamp()}`, source_path: lutPath, overwrite: true }, signal))
+  if (!installed.ok) return { ok: false, step: 'install', error: messageOf(installed.error) }
+  const applied = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: nodeIndex, lut_path: installed.value?.set_lut_path ?? lutPath, source: 'item', ...scopeOf(item.id) }, signal))
+  const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', max_nodes: 20, ...scopeOf(item.id) }, signal))
+  const node = (probe.ok ? probe.value?.nodes ?? [] : []).find((entry) => Number(entry.node_index) === nodeIndex) ?? null
+  const mountedLut = node?.lut ?? null
+  const readbackOk = Boolean(mountedLut && String(mountedLut).trim() !== '')
+  return {
+    ok: Boolean(applied.ok && applied.value?.success !== false && readbackOk),
+    itemId: item.id,
+    nodeIndex,
+    lutPath,
+    mountedLut,
+    readbackOk,
+    staged: installed.value ?? null,
+    error: applied.ok ? null : messageOf(applied.error),
+  }
+}
+
+/** 真实后处理颗粒 + 暗角：把 Resolve 导出的 ProRes 渲染成新的 ProRes 422 HQ。 */
+async function opTextureFilm(ctx, args, signal) {
+  const input = String(args.input ?? '').trim()
+  const output = String(args.output ?? '').trim()
+  if (!input || !output) throw new Error('texture.film 需要 input 和 output')
+  const stat = await fs.stat(input).catch(() => null)
+  if (!stat?.isFile()) throw new Error(`输入不存在：${input}`)
+  const grain = Math.max(0, Number(args.grain) || 0)
+  const vignette = Math.max(0, Number(args.vignette) || 0)
+  const filters = []
+  if (grain > 0) filters.push(`noise=alls=${grain}:allf=t+u`)
+  if (vignette > 0) filters.push(`vignette=angle=PI/${Math.max(2, 1 / Math.max(0.001, vignette))}`)
+  if (!filters.length) return { ok: false, error: 'grain 和 vignette 都为 0，没有可产生的像素效果' }
+  const temp = output + '.tmp.mov'
+  await run('ffmpeg', ['-y', '-v', 'error', '-i', input, '-vf', filters.join(','), '-map', '0:v:0', '-map', '0:a?', '-c:a', 'copy', '-c:v', 'prores_ks', '-profile:v', '3', '-pix_fmt', 'yuv422p10le', '-vendor', 'apl0', '-movflags', '+faststart', temp], { timeoutMs: 1_800_000 })
+  await fs.rename(temp, output)
+  const probe = await ffprobeJson(output)
+  const video = (probe?.streams ?? []).find((stream) => stream.codec_type === 'video')
+  return {
+    ok: Boolean(video),
+    input,
+    output,
+    grain,
+    vignette,
+    filters,
+    video: video ? { codec: video.codec_name, width: video.width, height: video.height, pixFmt: video.pix_fmt, frames: video.nb_frames } : null,
+    duration: Number(probe?.format?.duration) || null,
+  }
+}
+
+/** 逐镜头亮度匹配：在末尾空节点挂 CDL，把多个片段拉到共同目标亮度；读回节点与画面变化。 */
+async function opGradeShotMatch(ctx, args, signal) {
+  const trackIndex = Math.max(1, Number(args.trackIndex) || 1)
+  const items = await listVideoItems(ctx, signal, trackIndex)
+  if (!items.length) throw new Error('当前时间线没有视频片段')
+  const limit = Math.min(items.length, Math.max(1, Number(args.limit) || 6))
+  const targetFromArgs = Number.isFinite(Number(args.targetLuma)) ? Number(args.targetLuma) : null
+  const requestedNodeIndex = args.nodeIndex ? Math.max(1, Number(args.nodeIndex)) : null
+  const rows = []
+  // 先测，再决定目标；未给 target 时用各片段均值，避免偏爱第一条
+  for (const item of items.slice(0, limit)) {
+    const seek = await seekToItem(ctx, signal, item.id)
+    if (!seek.ok) { rows.push({ itemId: item.id, ok: false, error: `无法定位：${seek.error}` }); continue }
+    const frame = await captureRenderedFrame(ctx, signal, 'shotmatch-before')
+    const stats = await layersCli(['analyze', frame.path]).catch(() => null)
+    const before = Number(stats?.layers?.global?.meanLuma)
+    rows.push({ itemId: item.id, name: item.name, before, frame: frame.path, stats })
+  }
+  const valid = rows.filter((row) => Number.isFinite(row.before))
+  const target = targetFromArgs ?? (valid.length ? valid.reduce((sum, row) => sum + row.before, 0) / valid.length : null)
+  if (!Number.isFinite(target) || target <= 0) return { ok: false, stage: 'measure', error: '没有可用的亮度测量', rows }
+  for (const row of rows) {
+    if (!Number.isFinite(row.before)) continue
+    const seek = await seekToItem(ctx, signal, row.itemId)
+    if (!seek.ok) { row.ok = false; row.error = seek.error; continue }
+    try {
+      // 节点数不是固定 15：localKeys:false 时是 11；末尾空节点索引随图变化。
+      const pre = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', max_nodes: 1, ...scopeOf(row.itemId) }, signal))
+      const nodeCount = Number(pre.ok ? pre.value?.num_nodes : 0)
+      const itemNodeIndex = requestedNodeIndex || (Number.isFinite(nodeCount) && nodeCount > 0 ? nodeCount : 15)
+      const slope = Math.min(2.5, Math.max(0.4, target / Math.max(0.01, row.before)))
+      const cdl = { NodeIndex: itemNodeIndex, Slope: [slope, slope, slope], Offset: [0, 0, 0], Power: [1, 1, 1], Saturation: 1 }
+      const applied = await settle(callTool(ctx, 'timeline_item_color', { action: 'safe_set_cdl', cdl, source: 'item', ...scopeOf(row.itemId) }, signal))
+      const frame = await captureRenderedFrame(ctx, signal, 'shotmatch-after')
+      const stats = await layersCli(['analyze', frame.path]).catch(() => null)
+      const after = Number(stats?.layers?.global?.meanLuma)
+      const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', max_nodes: 20, ...scopeOf(row.itemId) }, signal))
+      const node = (probe.ok ? probe.value?.nodes ?? [] : []).find((entry) => Number(entry.node_index) === itemNodeIndex) ?? null
+      row.ok = Boolean(applied.ok && applied.value?.success !== false && Number.isFinite(after))
+      row.slope = slope
+      row.after = after
+      row.delta = Number.isFinite(after) ? after - row.before : null
+      row.nodeIndex = itemNodeIndex
+      row.nodeReadback = node
+      row.applied = applied.value ?? null
+      row.error = applied.ok ? null : messageOf(applied.error)
+    } catch (error) {
+      row.ok = false
+      row.error = messageOf(error)
+    }
+  }
+  const done = rows.filter((row) => row.ok)
+  return {
+    ok: done.length > 0,
+    targetLuma: target,
+    nodeIndex: requestedNodeIndex,
+    applied: done.length,
+    total: rows.length,
+    rows,
+    note: '逐镜头在末尾空节点挂 CDL 做亮度匹配；CDL 参数/节点读回见 rows，画面前后 meanLuma 为实测',
+  }
+}
+
+/** 限定器节点实际效果核验：逐节点关闭→抓帧→恢复，测全画面与皮肤/叶片 ROI 的变化。 */
+async function opGradeKeyCheck(ctx, args, signal) {
+  const { item } = await resolveItemContext(ctx, signal, args.itemId)
+  const nodes = Array.isArray(args.nodes) && args.nodes.length ? args.nodes.map(Number) : [10, 11, 12, 13]
+  const seek = await seekToItem(ctx, signal, item.id)
+  if (!seek.ok) throw new Error(`无法定位片段：${seek.error}`)
+  const roiOf = (value) => {
+    if (!value || typeof value !== 'object') return null
+    const x = Number(value.x); const y = Number(value.y); const w = Number(value.w); const h = Number(value.h)
+    return [x, y, w, h].every(Number.isFinite) && w > 0 && h > 0 ? { x, y, w, h } : null
+  }
+  const skinRoi = roiOf(args.skinRoi)
+  const leafRoi = roiOf(args.leafRoi)
+  const analyzeCrop = async (framePath, roi) => {
+    if (!roi) return null
+    const out = path.join(path.dirname(framePath), `roi-${stamp()}.png`)
+    const w = Math.max(2, Math.round(roi.w * 1920)); const h = Math.max(2, Math.round(roi.h * 1080))
+    const x = Math.max(0, Math.min(1919, Math.round(roi.x * 1920))); const y = Math.max(0, Math.min(1079, Math.round(roi.y * 1080)))
+    await run('ffmpeg', ['-y', '-v', 'error', '-i', framePath, '-vf', `crop=${w}:${h}:${x}:${y}`, '-frames:v', '1', out], { timeoutMs: 60_000 })
+    const stats = await layersCli(['analyze', out]).catch(() => null)
+    return stats?.layers?.global ?? null
+  }
+  const nudgeViewer = async () => {
+    const current = await settle(callTool(ctx, 'timeline_markers', { action: 'get_current_timecode' }, signal))
+    const tc = current.ok ? String(current.value?.timecode ?? '') : ''
+    const m = /^(\d+):(\d+):(\d+):(\d+)$/.exec(tc)
+    if (m) {
+      const total = ((Number(m[1]) * 60 + Number(m[2])) * 60 + Number(m[3])) * 24 + Number(m[4])
+      const shift = (delta) => {
+        const t = Math.max(0, total + delta)
+        const hh = String(Math.floor(t / 86400)).padStart(2, '0')
+        const mm = String(Math.floor((t % 86400) / 1440)).padStart(2, '0')
+        const ss = String(Math.floor((t % 1440) / 24)).padStart(2, '0')
+        const ff = String(t % 24).padStart(2, '0')
+        return `${hh}:${mm}:${ss}:${ff}`
+      }
+      await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode: shift(1) }, signal))
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode: shift(0) }, signal))
+      await new Promise((resolve) => setTimeout(resolve, 80))
+    }
+  }
+  await nudgeViewer()
+  const baseFrame = await captureRenderedFrame(ctx, signal, 'keycheck-base')
+  const base = await layersCli(['analyze', baseFrame.path]).catch(() => null)
+  const baseSkin = await analyzeCrop(baseFrame.path, skinRoi)
+  const baseLeaf = await analyzeCrop(baseFrame.path, leafRoi)
+  const results = []
+  for (const index of nodes) {
+    const disabled = await settle(callTool(ctx, 'graph', { action: 'set_node_enabled', node_index: index, enabled: false, source: 'item', ...scopeOf(item.id) }, signal))
+    await nudgeViewer()
+    const offFrame = await captureRenderedFrame(ctx, signal, `keycheck-off-${index}`)
+    const off = await layersCli(['analyze', offFrame.path]).catch(() => null)
+    const offSkin = await analyzeCrop(offFrame.path, skinRoi)
+    const offLeaf = await analyzeCrop(offFrame.path, leafRoi)
+    const enabled = await settle(callTool(ctx, 'graph', { action: 'set_node_enabled', node_index: index, enabled: true, source: 'item', ...scopeOf(item.id) }, signal))
+    await nudgeViewer()
+    const restored = await captureRenderedFrame(ctx, signal, `keycheck-on-${index}`)
+    const fullDelta = frameDelta(off, base)
+    const skinDelta = baseSkin && offSkin ? Number((baseSkin.meanLuma - offSkin.meanLuma).toFixed(4)) : null
+    const leafDelta = baseLeaf && offLeaf ? Number((baseLeaf.meanLuma - offLeaf.meanLuma).toFixed(4)) : null
+    results.push({
+      nodeIndex: index,
+      disabledOk: Boolean(disabled.ok && disabled.value?.success !== false),
+      enabledOk: Boolean(enabled.ok && enabled.value?.success !== false),
+      fullDelta,
+      skinLumaDelta: skinDelta,
+      leafLumaDelta: leafDelta,
+      effective: Boolean(fullDelta && (Math.abs(fullDelta.luma) > 0.002 || Math.abs(fullDelta.saturation) > 0.003)),
+      skinSpillRisk: skinDelta == null ? null : Math.abs(skinDelta) > 0.01,
+      leafSpillRisk: leafDelta == null ? null : Math.abs(leafDelta) > 0.01,
+      frames: { base: baseFrame.path, off: offFrame.path, restored: restored.path },
+    })
+  }
+  return { ok: results.some((row) => row.effective), itemId: item.id, itemName: item.name, skinRoi, leafRoi, results, caveat: 'Resolve 脚本 API 没有限定器参数 getter；这里用逐节点开关后的实际画面/ROI 变化证明节点是否生效，并检查肤色/叶片 ROI 是否被误伤。' }
+}
+
 async function opStyleOneClick(ctx, args, signal) {
   if (args.ignorePreflight !== true) {
     const preflight = await opPreflightCheck(ctx, {}, signal)
@@ -4364,7 +4709,8 @@ async function opStyleOneClick(ctx, args, signal) {
   if (!items.length) throw new Error('当前时间线没有视频片段')
   debugPush({ stage: '风格', message: `一键风格「${style.label}」开始：${style.techniques.join(' / ')}（出处：${style.sources.join(' , ')}）` })
   const results = []
-  for (const itemId of items) {
+  for (const [itemIndex, itemId] of items.entries()) {
+    const itemConsistency = Array.isArray(args.consistencyByItem) ? args.consistencyByItem[itemIndex] : args.consistency
     // ① 还原：走 restore.resolve（灰片→机型/曲线→官方 LUT），不按品牌猜
     let restore = null
     try {
@@ -4381,7 +4727,7 @@ async function opStyleOneClick(ctx, args, signal) {
     } catch (error) { restore = { ok: false, error: messageOf(error) } }
     // ② 风格：三层 15 节点，按配方改参数（不是套 LUT）
     const texturePlan = Number(style.grain) > 0 ? { grain: { amount: Number(style.grain), method: 'fusion-or-post' } } : null
-    const built = await opGradeBuild3(ctx, { itemId, lookPreset: style.key, lookStrength: 0, styleStrength: 0.95, recipe: style.recipe, skipStyleLut: true, texture: texturePlan }, signal).catch((error) => ({ ok: false, error: messageOf(error) }))
+    const built = await opGradeBuild3(ctx, { itemId, lookPreset: style.key, lookStrength: 0, styleStrength: 0.95, recipe: style.recipe, skipStyleLut: true, texture: texturePlan, consistency: itemConsistency, localStrength: args.localStrength, localKeys: args.localKeys }, signal).catch((error) => ({ ok: false, error: messageOf(error) }))
     // build3 重建会清掉节点上的 LUT：用**同一份** lutPath 在 build 之后补挂，失败就标失败（不再假装成功）
     if (restore?.lutPath) {
       try {
@@ -4759,6 +5105,43 @@ async function opGradeRebuildAll(ctx, args, signal) {
   }
 }
 
+/** 直接读取 DRX 的 Qualifier corrector 参数（绕过 drx parse 动作丢失 correctors 的问题）。 */
+async function readQualifierParamsFromDrx(drxPath) {
+  const candidates = [
+    path.join(os.homedir(), 'Library', 'Application Support', 'davinci-resolve-mcp', 'resolve-advanced', 'vendor', 'drx-codec', 'drx-parser.js'),
+    '/Users/wupx/Library/Application Support/davinci-resolve-mcp/resolve-advanced/vendor/drx-codec/drx-parser.js',
+  ]
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(candidate)
+      if (!stat.isFile()) continue
+      const { createRequire } = await import('node:module')
+      const requireCjs = createRequire(import.meta.url)
+      const parser = requireCjs(candidate)
+      const parsed = await parser.parseDRX(drxPath)
+      const out = {}
+      for (const node of parsed?.nodes ?? []) {
+        const quals = []
+        for (const corrector of node.correctors ?? []) {
+          if (!/qualifier/i.test(String(corrector.typeName ?? ''))) continue
+          const fields = {}
+          for (const param of corrector.parameters ?? []) {
+            const name = String(param.name ?? '')
+            if (!/^qualifier\./.test(name)) continue
+            fields[name.replace(/^qualifier\./, '')] = param.value
+          }
+          if (Object.keys(fields).length) quals.push(fields)
+        }
+        if (quals.length) out[Number(node.index ?? node.id)] = { label: node.label, qualifiers: quals }
+      }
+      return { ok: true, parser: candidate, nodes: out }
+    } catch (error) {
+      continue
+    }
+  }
+  return { ok: false, error: '本地 DRX parser 不可用（advanced MCP 包未安装）' }
+}
+
 async function opGradeBuild3(ctx, args, signal) {
   const fps = await projectFps(ctx, signal)
   const { item, info } = await resolveItemContext(ctx, signal, args.itemId)
@@ -4785,10 +5168,13 @@ async function opGradeBuild3(ctx, args, signal) {
     texture: args.texture ?? null,
     styleStrength: Number(args.styleStrength) ?? 0.8,
     recipe: args.recipe ?? null,
+    localStrength: args.localStrength,
+    localKeys: args.localKeys,
   })
   const drxNodes = toDrxNodes(graph)
   // 逐组参数写入后逐个节点「生成→解析读回」，确认没有被相邻节点/默认值覆盖
   let recipeVerification = null
+  let qualifierVerification = null
   if (args.recipe && Object.keys(args.recipe).length) {
     debugPush({ stage: '配方', message: '开始逐节点生成/解析 drx 校验' })
     try {
@@ -4810,6 +5196,19 @@ async function opGradeBuild3(ctx, args, signal) {
       await new Promise((resolve) => setTimeout(resolve, 40))
       const parsed = gen.ok ? await settle(callTool(ctx, 'drx', { action: 'parse', drxPath: tmp }, signal)) : null
       const parsedNode = parsed?.ok ? (parsed.value?.nodes?.[0] ?? null) : null
+      // DRX parser 把限定器参数放在 node.correctors[type=Qualifier].parameters，而不是 node.params。
+      if (node.params?.qualifier) {
+        const corr = (parsedNode?.correctors ?? []).find((entry) => /qualifier/i.test(String(entry.typeName ?? '')) && (entry.parameters ?? []).some((param) => /^qualifier\./.test(String(param.name ?? ''))))
+        const actualQ = Object.fromEntries((corr?.parameters ?? []).filter((param) => /^qualifier\./.test(String(param.name ?? ''))).map((param) => [String(param.name).replace(/^qualifier\./, ''), param.value]))
+        qualifierVerification = qualifierVerification ?? []
+        for (const key of ['hueCenter', 'hueWidth', 'hueSoft', 'hueSymmetry', 'satLow', 'satHigh', 'satLowSoft', 'satHighSoft', 'lumLow', 'lumHigh', 'lumLowSoft', 'lumHighSoft']) {
+          const expected = node.params.qualifier[key]
+          if (expected === undefined) continue
+          const actual = actualQ[key]
+          const closeQ = typeof expected === 'number' && typeof actual === 'number' && Math.abs(expected / 100 - actual) <= 2e-3
+          qualifierVerification.push({ node: node.label, tool: node.tool, field: `qualifier.${key}`, expected, actual: actual ?? null, verified: Boolean(closeQ), note: actual == null ? 'DRX correctors 未暴露该限定器字段' : null })
+        }
+      }
       for (const field of fields) {
         const expected = node.params[field] ?? null
         const actual = parsedNode?.params?.[field] ?? parsedNode?.[field] ?? null
@@ -4823,7 +5222,8 @@ async function opGradeBuild3(ctx, args, signal) {
           return JSON.stringify(a) === JSON.stringify(b)
         }
         const same = actual == null ? false : (field === 'saturation'
-          ? (Math.abs(expected / 100 - actual) <= 2e-3 || close(expected, actual))
+          // build 图把 1.0 写成 50；drx 解析回来是 normalized 0..1。46 应对应 0.92。
+          ? (Math.abs(expected / 50 - actual) <= 2e-3 || Math.abs(expected / 100 - actual) <= 2e-3 || close(expected, actual))
           : close(expected, actual))
         recipeVerification.push({ node: node.label, tool: node.tool, field, expected, actual, verified: same, note: actual == null ? 'drx 解析器未暴露该字段，无法读回' : null })
       }
@@ -4877,9 +5277,24 @@ async function opGradeBuild3(ctx, args, signal) {
   } catch (error) {
     return { ok: false, stage: 'capture-before', graph, error: messageOf(error) }
   }
+  // 读回重建前的 Node 1 还原 LUT；build3 会 reset grade，若不补挂会把 LOG 还原一起清掉。
+  // 但项目已由 RCM 接管输入变换时，补挂技术 LUT 会二次还原，必须跳过。
+  const projectState = await settle(callTool(ctx, 'project_settings', { action: 'get_setting' }, signal))
+  const projectValues = projectState.ok ? (projectState.value?.settings ?? projectState.value ?? {}) : {}
+  const rcmManaged = /managed/i.test(String(projectValues.colorScienceMode ?? ''))
+  const preNodes = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
+  const preNode1Lut = (preNodes.ok ? preNodes.value?.nodes ?? [] : []).find((node) => Number(node.node_index) === 1)?.lut || null
+  const restoreLutPath = rcmManaged ? null : (args.restoreLutPath || preNode1Lut || null)
   // 同结构 apply 会保留旧布局 → 先清空再套（MCP 文档明确要求）
   await resetGradeConfirmed(ctx, signal, item.id)
   const applied = await applyDrxConfirmed(ctx, signal, { path: applyPath, source: 'item', require_temp_path: true, ...scopeOf(item.id) })
+  let restoreReapplied = null
+  if (restoreLutPath) {
+    const re = await settle(callTool(ctx, 'graph', { action: 'set_lut', node_index: 1, lut_path: restoreLutPath, source: 'item', ...scopeOf(item.id) }, signal))
+    const rr = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
+    const node1 = (rr.ok ? rr.value?.nodes ?? [] : []).find((node) => Number(node.node_index) === 1) ?? null
+    restoreReapplied = { ok: Boolean(re.ok && node1?.lut), mountedLut: node1?.lut ?? null, source: preNode1Lut ? 'before-build' : 'args' }
+  }
 
   // 5) 风格 LUT 挂到「独立」的 12 号节点（不塞进校正节点）
   let look = null
@@ -4899,6 +5314,28 @@ async function opGradeBuild3(ctx, args, signal) {
       readback: read.ok ? read.value?.lut ?? read.value : null,
     }
   }
+
+  // 5.5) DRX qualifier 参数读回：限定器参数不在 node.params，也不在 drx parse 动作的默认输出里；
+  // 直接从合并后的 .drx 的 correctors[type=Qualifier].parameters 读取。
+  let qualifierDrx = null
+  try {
+    const drx = await readQualifierParamsFromDrx(applyPath)
+    if (drx.ok) {
+      const rows = []
+      for (const [index, entry] of Object.entries(drx.nodes)) {
+        const spec = graph.nodes[Number(index) - 1]
+        const expected = spec?.params?.qualifier ?? null
+        if (!expected) continue
+        const actual = (entry.qualifiers ?? []).find((q) => q.hueCenter !== undefined) ?? entry.qualifiers?.[0] ?? {}
+        for (const key of ['hueCenter', 'hueWidth', 'hueSoft', 'hueSymmetry', 'satLow', 'satHigh', 'satLowSoft', 'satHighSoft', 'lumLow', 'lumHigh', 'lumLowSoft', 'lumHighSoft']) {
+          if (expected[key] === undefined) continue
+          const actualValue = actual[key]
+          rows.push({ node: entry.label, nodeIndex: Number(index), field: `qualifier.${key}`, expected: expected[key], actual: actualValue ?? null, verified: typeof actualValue === 'number' ? Math.abs(expected[key] / 100 - actualValue) <= 2e-3 : false })
+        }
+      }
+      qualifierDrx = { ok: true, parser: drx.parser, rows, verified: rows.filter((row) => row.verified).length, total: rows.length }
+    } else qualifierDrx = drx
+  } catch (error) { qualifierDrx = { ok: false, error: messageOf(error) } }
 
   // 6) 验证：节点数/labels + 画面增量
   const nodes = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
@@ -4922,9 +5359,13 @@ async function opGradeBuild3(ctx, args, signal) {
     applied: applied.applied.value ?? null,
     error: applied.applied.ok ? null : applied.applied.error,
     look,
+    restoreReapplied,
+    colorManagement: { mode: projectValues.colorScienceMode ?? null, input: projectValues.colorSpaceInput ?? null, timeline: projectValues.colorSpaceTimeline ?? null, output: projectValues.colorSpaceOutput ?? null, rcmManaged },
     nodeGraph: nodes.ok ? nodes.value : null,
     verification: { frameDelta: delta, rendered, beforeFrame: beforeFrame.path, afterFrame: afterFrame.path },
     recipeVerification,
+    qualifierVerification,
+    qualifierDrx,
     followUp: '节点已按三层分行排好（坐标见 layoutPositions）；打开节点图后请在空白处右键 →「适配窗口大小」才能一次看到全部 15 个节点',
     note: 'L1 统一 → L2 调色 → L3 风格/特效；每个节点只放一个工具；风格 LUT 独立节点',
   }
@@ -5433,7 +5874,9 @@ async function opRestoreApply(ctx, args, signal) {
   const probe = await settle(callTool(ctx, 'timeline_item_color', { action: 'probe_node_graph', ...scopeOf(item.id) }, signal))
   const node1 = (probe.ok ? probe.value?.nodes ?? [] : []).find((node) => Number(node.node_index) === 1) ?? null
   const mountedLut = node1?.lut ?? null
-  const readbackOk = Boolean(mountedLut && String(mountedLut).toLowerCase().includes(String(path.basename(lutPath)).replace(/\.cube$/i, '').toLowerCase().split('-').pop()))
+  const stagedPath = staged.value?.set_lut_path ?? null
+  // set_lut 成功 + 节点 1 实际非空即视为挂载成功；不再用原文件名的最后一个词去猜（旧逻辑会把 V-Log to V-709 误判失败）
+  const readbackOk = Boolean(appliedOk && mountedLut && String(mountedLut).trim() !== '' && (!stagedPath || String(mountedLut) === String(stagedPath)))
   debugPush({ stage: '还原', message: `还原 LUT 套用结果：applied=${appliedOk} 读回=${mountedLut ?? '无'}` })
   return { ok: appliedOk, applied: appliedOk, lutPath, mountedLut, readbackOk, staged: staged.value ?? null, error: appliedOk ? null : 'Resolve 拒绝挂载 LUT（set_lut 返回 false）' }
 }
@@ -5852,12 +6295,14 @@ async function importVideoToPool(ctx, filePath, signal) {
 }
 
 /** 把前景 clip 放到目标片段同一记录起点的 V2。 */
-async function placeForegroundOnV2(ctx, { clipId, targetItem, frameCount }, signal) {
-  await ensureVideoTrack(ctx, signal, 2)
+async function placeForegroundOnV2(ctx, { clipId, targetItem, frameCount, timelineFrames }, signal) {
+  const ensured = await ensureVideoTrack(ctx, signal, 2)
+  if (!ensured?.ok) throw new Error(`无法创建/确认 V2 轨道：${messageOf(ensured?.error)}；本次未放置前景。`)
   const timeline = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
   const timelineStart = Number(timeline.ok ? timeline.value?.start_frame : 0) || 0
   const targetStart = Number(targetItem.start)
-  const targetEnd = targetStart + Math.max(1, Number(frameCount) || 1)
+  const expectedFrames = Math.max(1, Number(timelineFrames) || Number(frameCount) || 1)
+  const targetEnd = targetStart + expectedFrames
   // 重复点击保护：V2 有重叠片段时，只替换插件自己生成的 alpha 片段；用户片段一律拒绝。
   const existing = await settle(callTool(ctx, 'timeline', { action: 'get_items', track_type: 'video', track_index: 2 }, signal))
   const existingItems = existing.ok && Array.isArray(existing.value?.items) ? existing.value.items : []
@@ -5887,11 +6332,21 @@ async function placeForegroundOnV2(ctx, { clipId, targetItem, frameCount }, sign
     },
   }, signal))
   if (!appended.ok) throw new Error(`叠加到 V2 失败：${messageOf(appended.error)}`)
+  const expectedItem = appended.value?.items?.[0] ?? null
+  if (!expectedItem?.timeline_item_id) throw new Error('V2 放置失败：append 没有返回 timeline item id')
+  // 必须重新读 V2 并按 append 返回的 id 核对，不能拿“V2 上任意 item”当成功。
   const v2 = await settle(callTool(ctx, 'timeline', { action: 'get_items', track_type: 'video', track_index: 2 }, signal))
-  const items = v2.ok && Array.isArray(v2.value?.items) ? v2.value.items : []
-  const appendedItem = appended.value?.items?.[0] ?? null
-  const placed = Boolean(appendedItem?.timeline_item_id) || items.length > 0
-  return { recordFrame, placed, v2Items: items.length, placedItem: appendedItem, appended: appended.value ?? null }
+  if (!v2.ok) throw new Error(`V2 放置后读回失败：${messageOf(v2.error)}`)
+  const items = Array.isArray(v2.value?.items) ? v2.value.items : []
+  const found = items.find((item) => item.id === expectedItem.timeline_item_id || item.timeline_item_id === expectedItem.timeline_item_id) ?? null
+  if (!found) throw new Error(`V2 放置后未读回 append 返回的 item（${expectedItem.timeline_item_id}）`)
+  const actualStart = Number(found.start)
+  const actualEnd = Number(found.end)
+  if (actualStart !== targetStart) throw new Error(`V2 起点不符：期望绝对帧 ${targetStart}，实际 ${actualStart}`)
+  if (Math.abs((actualEnd - actualStart) - expectedFrames) > 1) {
+    throw new Error(`V2 时长不符：期望 ${expectedFrames} 帧，实际 ${actualEnd - actualStart} 帧`)
+  }
+  return { recordFrame, placed: true, start: actualStart, end: actualEnd, duration: actualEnd - actualStart, v2Items: items.length, placedItem: found, appended: appended.value ?? null }
 }
 
 /** 把 V2 前景按目标时间线画幅等比/非等比放大，避免 960 前景在 1920 时间线里只显示半幅。 */
@@ -5912,19 +6367,40 @@ async function fitForegroundToFrame(ctx, placedItem, { alphaWidth, alphaHeight }
 
 /** 首/中/末帧合成预览（降低到 640 宽返回 dataUrl），结束后恢复播放头。 */
 async function captureCompositePreviews(ctx, { targetItem, frameCount, fps }, signal) {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   const original = await settle(callTool(ctx, 'timeline_markers', { action: 'get_current_timecode' }, signal))
+  const pageBefore = await settle(callTool(ctx, 'resolve_control', { action: 'get_page' }, signal))
+  const page = pageBefore.ok ? pageBefore.value?.page : null
+  if (page && page !== 'edit') {
+    await settle(callTool(ctx, 'resolve_control', { action: 'open_page', params: { page: 'edit', allow_during_playback: true } }, signal))
+    await sleep(400)
+  }
   const timeline = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
   const timelineStart = Number(timeline.ok ? timeline.value?.start_frame : 0) || 0
   const { framesToTimecode, isDropFrameRate } = await importFresh('lib/time_mapping.mjs')
+  const startFrame = Number(targetItem.start)
+  const awayFrame = startFrame + Math.max(2, Math.round(fps / 12))
+  const awayTc = framesToTimecode(awayFrame, fps, isDropFrameRate(fps))
   const offsets = [0, Math.max(1, Math.floor(frameCount / 2)), Math.max(1, frameCount - 1)]
   const previews = []
+  // 放置后 Resolve 的 viewer 可能还没刷新：先等一拍，再强制 seek 到相邻帧，再回目标帧，
+  // 否则“当前就在首帧”时 set 同一 timecode 不会触发刷新，首帧预览会只有背景。
+  await sleep(350)
   for (const offset of offsets) {
-    const timecode = framesToTimecode(Number(targetItem.start) + offset, fps, isDropFrameRate(fps))
+    const timecode = framesToTimecode(startFrame + offset, fps, isDropFrameRate(fps))
+    await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode: awayTc }, signal))
+    await sleep(120)
     await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode }, signal))
+    await sleep(300)
     const dir = await ensureDataDir('frames')
     const still = path.join(dir, `alpha-preview-${stamp()}-${offset}.png`)
-    const exported = await settle(callTool(ctx, 'project_settings', { action: 'export_frame_as_still', path: still }, signal))
-    if (!exported.ok || !exported.value?.success) { previews.push({ offset, ok: false, error: '导出合成帧失败' }); continue }
+    let exported = await settle(callTool(ctx, 'project_settings', { action: 'export_frame_as_still', path: still }, signal))
+    if (!exported.ok || !exported.value?.success) {
+      // 再等一次，避免刚 seek 完 viewer/缓存仍未出帧
+      await sleep(500)
+      exported = await settle(callTool(ctx, 'project_settings', { action: 'export_frame_as_still', path: still }, signal))
+    }
+    if (!exported.ok || !exported.value?.success) { previews.push({ offset, ok: false, error: '导出合成帧失败（已强制 seek/重试）' }); continue }
     const small = still.replace(/\.png$/i, '-small.jpg')
     await run('ffmpeg', ['-v', 'error', '-i', still, '-vf', 'scale=640:-2', '-q:v', '3', '-y', small], { timeoutMs: 60_000 }).catch(() => null)
     const bytes = await fs.readFile(small).catch(() => null) ?? await fs.readFile(still)
@@ -5933,7 +6409,22 @@ async function captureCompositePreviews(ctx, { targetItem, frameCount, fps }, si
   if (original.ok && original.value?.timecode) {
     await settle(callTool(ctx, 'timeline_markers', { action: 'set_current_timecode', timecode: original.value.timecode }, signal))
   }
+  if (page && page !== 'edit') {
+    await settle(callTool(ctx, 'resolve_control', { action: 'open_page', params: { page, allow_during_playback: true } }, signal))
+  }
   return previews
+}
+
+/** 供面板显式选择 V1 目标片段，避免播放头位于 V2 时 target 变成 alpha。 */
+async function opVideoTargets(ctx, args, signal) {
+  await requireVideoMattingEnabled()
+  const timeline = await settle(callTool(ctx, 'timeline', { action: 'get_current' }, signal))
+  const items = await listVideoItems(ctx, signal, 1)
+  return {
+    ok: true,
+    timeline: timeline.ok ? { name: timeline.value?.name, id: timeline.value?.id, start_frame: timeline.value?.start_frame } : null,
+    targets: items.map((item) => ({ id: item.id, name: item.name, start: Number(item.start), end: Number(item.end), duration: Number(item.duration) })),
+  }
 }
 
 /** 供面板选择源视频：列出 Master 文件夹的媒体池条目。 */
@@ -5990,16 +6481,27 @@ async function opVideoSourcePreview(ctx, args, signal) {
 /** 路径 A：导入本身就带 alpha 的视频，按目标片段同一时间点叠到 V2。 */
 async function opAlphaComposite(ctx, args, signal) {
   await requireVideoMattingEnabled()
-  const filePath = String(args.filePath ?? '').trim()
-  if (!filePath) throw new Error('alpha.composite 需要 filePath（带 alpha 的视频）')
+  let filePath = String(args.filePath ?? '').trim()
+  if (!filePath && args.dataUrl) {
+    const match = /^data:[^;]+;base64,(.+)$/s.exec(String(args.dataUrl))
+    if (!match) throw new Error('上传文件 dataUrl 格式不对')
+    const bytes = Buffer.from(match[1], 'base64')
+    if (bytes.length > 20 * 1024 * 1024) throw new Error(`上传文件 ${(bytes.length / 1024 / 1024).toFixed(1)}MB 超过 20MB 上限；请用媒体池或本机路径导入大文件。`)
+    const uploadDir = await ensureDataDir('uploads')
+    const ext = String(args.fileName ?? '').match(/\.[a-z0-9]+$/i)?.[0] ?? '.mov'
+    filePath = path.join(uploadDir, `upload-${stamp()}${ext}`)
+    await fs.writeFile(filePath, bytes)
+  }
+  if (!filePath) throw new Error('alpha.composite 需要 filePath 或上传 dataUrl（带 alpha 的视频）')
   const stat = await fs.stat(filePath).catch(() => null)
   if (!stat?.isFile()) throw new Error(`文件不存在：${filePath}`)
+  const { pixFmtHasAlpha } = await importFresh('lib/video_alpha.mjs')
   const probe = await ffprobeJson(filePath)
   const video = (probe.streams ?? []).find((stream) => stream.codec_type === 'video')
   if (!video) throw new Error('文件没有视频轨')
   const pixFmt = String(video.pix_fmt ?? '')
   const alphaTag = String(video.tags?.alpha_mode ?? video.tags?.ALPHA_MODE ?? probe.format?.tags?.alpha_mode ?? probe.format?.tags?.ALPHA_MODE ?? '').toLowerCase()
-  const hasAlpha = /a/i.test(pixFmt) || alphaTag === '1'
+  const hasAlpha = pixFmtHasAlpha(pixFmt) || alphaTag === '1'
   if (!hasAlpha) return { ok: false, unsupported: true, error: `该视频没有 alpha 通道（pix_fmt=${pixFmt || 'unknown'}）。请导入 ProRes 4444 / VP9 alpha / PNG 序列等带 alpha 的素材。`, probe: { codec: video.codec_name, pix_fmt: pixFmt, alpha_mode: alphaTag || null, width: video.width, height: video.height } }
   const { rateValue } = await importFresh('lib/time_mapping.mjs')
   const fps = Number(video.r_frame_rate ? rateValue(video.r_frame_rate) : null) || Number(args.fps) || 24
@@ -6023,12 +6525,12 @@ async function opAlphaComposite(ctx, args, signal) {
     }
     const normProbe = await ffprobeJson(normPath)
     const normStream = (normProbe.streams ?? []).find((stream) => stream.codec_type === 'video')
-    if (!/a/i.test(String(normStream?.pix_fmt ?? ''))) return { ok: false, unsupported: true, error: '归一化后仍没有 alpha' }
+    if (!pixFmtHasAlpha(normStream?.pix_fmt)) return { ok: false, unsupported: true, error: '归一化后仍没有 alpha' }
     normalization = { from: video.codec_name, to: 'prores4444', path: normPath, pixFmt: normStream?.pix_fmt }
     importPath = normPath
   }
   const clip = await importVideoToPool(ctx, importPath, signal)
-  const placement = await placeForegroundOnV2(ctx, { clipId: clip.id, targetItem, frameCount }, signal)
+  const placement = await placeForegroundOnV2(ctx, { clipId: clip.id, targetItem, frameCount, timelineFrames }, signal)
   const previews = await captureCompositePreviews(ctx, { targetItem, frameCount: timelineFrames, fps: timelineFps }, signal)
   return {
     ok: true,
@@ -6067,6 +6569,15 @@ async function opVideoCutout(ctx, args, signal) {
   const resolution = await timelineResolution(ctx, signal)
   const backend = String(args.backend ?? 'rvm').toLowerCase()
   if (!['rvm', 'vision'].includes(backend)) return { ok: false, error: `不支持的抠像后端：${backend}（可用 rvm / vision）` }
+  const depthRequested = backend === 'rvm' && args.depthOcclusion === true
+  if (depthRequested) {
+    return {
+      ok: false,
+      backend: 'rvm',
+      step: 'depth_uncalibrated',
+      error: '逐帧单目深度图各自做百分位归一化，即使同一文件的不同帧也会破坏绝对尺度；当前实现不能可靠判断前后遮挡，已拒绝应用 depthOcclusion。需要相机标定/统一深度尺度或人工 trimap，不能靠“同源”当可靠。',
+    }
+  }
   const sampleFps = Math.max(2, Math.min(Number(timelineFps), Number(args.fps) || Number(timelineFps)))
   const durationSec = Math.max(0.5, Math.min(Number(args.durationSec) || 2, 10))
   const width = Math.max(320, Math.min(3840, Number(args.width) || resolution.width))
@@ -6077,14 +6588,18 @@ async function opVideoCutout(ctx, args, signal) {
     ? Number(sourceStream.height) / Number(sourceStream.width)
     : resolution.height / resolution.width
   const height = Math.max(180, Math.round(width * sourceAspect / 2) * 2)
-  const count = Math.max(2, Math.min(Number(args.maxFrames) || 120, Math.round(durationSec * sampleFps)))
+  const count = Math.max(2, Math.min(Number(args.maxFrames) || 240, Math.round(durationSec * sampleFps)))
   const sourceStart = Math.max(0, Number(args.startSec) || 0)
   const times = Array.from({ length: count }, (_, index) => sourceStart + index / sampleFps)
+  // 首帧 RVM 没有 recurrent 上下文，先跑源片段之前的 warmup 帧再丢弃输出。
+  const requestedWarmup = Math.max(0, Number(args.warmupFrames) || 8)
+  const warmup = Math.min(requestedWarmup, Math.floor(sourceStart * sampleFps))
+  const allTimes = Array.from({ length: warmup + count }, (_, index) => sourceStart + (index - warmup) / sampleFps)
   const workDir = await ensureDataDir(path.join('alpha', `cutout-${stamp()}`))
   const frameDir = path.join(workDir, 'frames')
   await fs.mkdir(frameDir, { recursive: true })
-  const jpgs = await extractFramesAt(sourcePath, times, frameDir, width)
-  if (jpgs.length !== count) return { ok: false, error: `抽帧不完整：${jpgs.length}/${count}` }
+  const jpgs = await extractFramesAt(sourcePath, allTimes, frameDir, width)
+  if (jpgs.length !== warmup + count) return { ok: false, error: `抽帧不完整：${jpgs.length}/${warmup + count}（含 warmup ${warmup}）` }
 
   const matteDir = path.join(workDir, 'matte')
   await fs.mkdir(matteDir, { recursive: true })
@@ -6105,26 +6620,30 @@ async function opVideoCutout(ctx, args, signal) {
       return { ok: false, backend: 'rvm', error: `跨帧跟踪在第 ${tracked.lostAt} 帧丢失；拒绝用全前景分割冒充主体跟踪`, subjectBox, tracking: { lostAt: tracked.lostAt } }
     }
     const boxes = [subjectBox, ...tracked.frames.map((frame) => ({ x: frame.x, y: frame.y, w: frame.w, h: frame.h }))]
-    if (boxes.length !== count) return { ok: false, backend: 'rvm', error: `跟踪框数量 ${boxes.length} != 帧数 ${count}` }
+    if (boxes.length !== warmup + count) return { ok: false, backend: 'rvm', error: `跟踪框数量 ${boxes.length} != 总帧数 ${warmup + count}` }
     const boxesPath = path.join(workDir, 'boxes.json')
     await fs.writeFile(boxesPath, JSON.stringify(boxes))
-    tracking = { subjectBox, frames: tracked.frames.length, lostAt: tracked.lostAt ?? null, implemented: true }
+    tracking = { subjectBox, frames: tracked.frames.length, warmup, lostAt: tracked.lostAt ?? null, implemented: true }
+    let rvmStdout = ''
     try {
-      await run(python, [
+      rvmStdout = await run(python, [
         path.join(HERE, 'scripts', 'video_matting.py'), 'rvm',
         '--frames', frameDir, '--boxes', boxesPath, '--out', matteDir,
-        '--model', model, '--refine',
+        '--model', model, '--refine', '--warmup', String(warmup), '--gate-padding', '0.15',
       ], { timeoutMs: 1_800_000 })
     } catch (error) {
       return { ok: false, backend: 'rvm', error: `RVM 推理失败：${messageOf(error).slice(0, 800)}` }
     }
-    backendReport = { backend: 'rvm', model: path.basename(model), temporal: 'recurrent-state', refine: 'guided-filter', edgeRefinement: true, nativeResolution: `${width}x${height}`, bitDepth: 16 }
+    let rvmReport = null
+    try { rvmReport = JSON.parse(String(rvmStdout).trim() || '{}') } catch { rvmReport = null }
+    backendReport = { backend: 'rvm', model: path.basename(model), temporal: 'recurrent-state', refine: 'guided-filter', edgeRefinement: true, nativeResolution: `${width}x${height}`, bitDepth: 16, warmup, temporalIoU: rvmReport?.temporalIoU ?? null }
   } else {
     // 旧的逐帧 Vision 全前景路径：保留为显式演示，不冒充跟踪
     const { cutoutImage } = await importFresh('lib/cutout.mjs')
-    for (let index = 0; index < jpgs.length; index += 1) {
+    const visionFrames = jpgs.slice(warmup)
+    for (let index = 0; index < visionFrames.length; index += 1) {
       const out = path.join(matteDir, `frame-${String(index).padStart(4, '0')}.png`)
-      try { await cutoutImage(jpgs[index], out) }
+      try { await cutoutImage(visionFrames[index], out) }
       catch (error) { return { ok: false, backend: 'vision', error: `逐帧抠像第 ${index} 帧失败：${messageOf(error)}` } }
     }
     backendReport = { backend: 'vision', temporal: 'none', edgeRefinement: false, nativeResolution: `${width}x${height}`, bitDepth: 8 }
@@ -6132,7 +6651,7 @@ async function opVideoCutout(ctx, args, signal) {
 
   let effectiveMatteDir = matteDir
   let depthReport = null
-  if (backend === 'rvm' && args.depthOcclusion !== false) {
+  if (backend === 'rvm' && depthRequested) {
     const runtime = await resolveMattingRuntime()
     if (!runtime.ready) return { ok: false, backend: 'rvm', error: '视频抠像运行时未就绪；请重新启用功能开关。' }
     const python = runtime.python
@@ -6142,7 +6661,9 @@ async function opVideoCutout(ctx, args, signal) {
     const fgDepthDir = path.join(workDir, 'fg-depth')
     const occludedDir = path.join(workDir, 'depth-occluded')
     await fs.mkdir(targetFrameDir, { recursive: true })
-    const targetFrames = await extractFramesAt(targetInfo.filePath, times, targetFrameDir, width)
+    const targetSourceStart = (Number(targetInfo.sourceStartFrame) || 0) / (Number(targetInfo.sourceFps) || timelineFps)
+    const targetTimes = Array.from({ length: count }, (_, index) => targetSourceStart + index / sampleFps)
+    const targetFrames = await extractFramesAt(targetInfo.filePath, targetTimes, targetFrameDir, width)
     if (targetFrames.length !== count) return { ok: false, backend: 'rvm', error: `目标片段抽帧不完整：${targetFrames.length}/${count}` }
     try {
       await run(python, [path.join(HERE, 'scripts', 'video_matting.py'), 'depth', '--frames', frameDir, '--out', fgDepthDir, '--model', depthModel], { timeoutMs: 1_800_000 })
@@ -6169,10 +6690,11 @@ async function opVideoCutout(ctx, args, signal) {
   const alphaProbe = await ffprobeJson(alphaMovie)
   const alphaStream = (alphaProbe.streams ?? []).find((stream) => stream.codec_type === 'video')
   const alphaPix = String(alphaStream?.pix_fmt ?? '')
-  if (!/a/i.test(alphaPix)) return { ok: false, backend, error: `alpha 视频编码失败：pix_fmt=${alphaPix}`, alphaMovie }
+  const { pixFmtHasAlpha } = await importFresh('lib/video_alpha.mjs')
+  if (!pixFmtHasAlpha(alphaPix)) return { ok: false, backend, error: `alpha 视频编码失败：pix_fmt=${alphaPix}`, alphaMovie }
   const clip = await importVideoToPool(ctx, alphaMovie, signal)
-  const placement = await placeForegroundOnV2(ctx, { clipId: clip.id, targetItem, frameCount: count }, signal)
   const timelineFrames = Math.max(2, Math.round((count / sampleFps) * timelineFps))
+  const placement = await placeForegroundOnV2(ctx, { clipId: clip.id, targetItem, frameCount: count, timelineFrames }, signal)
   const previews = await captureCompositePreviews(ctx, { targetItem, frameCount: timelineFrames, fps: timelineFps }, signal)
   const expectedSec = count / sampleFps
   const actualSec = Number(alphaProbe.format?.duration) || 0
@@ -6191,6 +6713,7 @@ async function opVideoCutout(ctx, args, signal) {
     trackingImplemented: Boolean(tracking?.implemented),
     subjectSelection: backend === 'rvm' ? 'tracked subject box + RVM alpha' : 'automatic foreground instances (no tracked subject mask)',
     backendReport,
+    temporalIoU: backendReport?.temporalIoU ?? null,
     depthOcclusion: depthReport,
     limitations: backend === 'rvm'
       ? ['RVM 输出人物/前景 alpha；主体框跟踪已参与裁切与掩膜，但仍不是多目标实例分割', '极快运动/完全遮挡仍可能丢失，丢失会失败而非猜测']
@@ -6245,8 +6768,8 @@ async function resolveMattingRuntime() {
     const rvm = path.join(candidate.root, 'models', 'rvm_mobilenetv3_fp32.onnx')
     const depth = path.join(candidate.root, 'models', 'depth_anything_v2_small_fp16.onnx')
     const [pythonStat, rvmStat, depthStat] = await Promise.all([fs.stat(python).catch(() => null), fs.stat(rvm).catch(() => null), fs.stat(depth).catch(() => null)])
-    if (pythonStat?.isFile() && rvmStat?.isFile() && depthStat?.isFile()) {
-      return { ready: true, source: candidate.source, root: candidate.root, python, rvm, depth }
+    if (pythonStat?.isFile() && rvmStat?.isFile()) {
+      return { ready: true, source: candidate.source, root: candidate.root, python, rvm, depth: depthStat?.isFile() ? depth : null }
     }
   }
   return { ready: false, source: null, root: null, python: null, rvm: null, depth: null }
@@ -6300,16 +6823,10 @@ async function setupMattingRuntime() {
   steps.push('已安装 onnxruntime/numpy/opencv/pillow')
   const models = path.join(root, 'models')
   const rvm = path.join(models, 'rvm_mobilenetv3_fp32.onnx')
-  const depth = path.join(models, 'depth_anything_v2_small_fp16.onnx')
   const rvmStat = await fs.stat(rvm).catch(() => null)
   if (!rvmStat?.isFile() || rvmStat.size < 1_000_000) {
     await downloadModel(RVM_MODEL_URL, rvm, 1_000_000)
-    steps.push('已下载 RVM 模型')
-  }
-  const depthStat = await fs.stat(depth).catch(() => null)
-  if (!depthStat?.isFile() || depthStat.size < 1_000_000) {
-    await downloadModel(DEPTH_MODEL_URL, depth, 1_000_000)
-    steps.push('已下载 Depth Anything V2 模型')
+    steps.push('已下载 RVM 模型（深度遮挡当前不启用，不下载 Depth 模型）')
   }
   const runtime = await resolveMattingRuntime()
   if (!runtime.ready) return { ok: false, error: '运行时安装后自检未通过', steps }
@@ -6728,7 +7245,7 @@ async function opFeedbackIssue(ctx, args, signal) {
     '',
     '### 环境',
     '```json',
-    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.11.0' }, null, 2),
+    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.13.0' }, null, 2),
     '```',
     '',
     '### 调试日志（最近）',
@@ -6798,6 +7315,7 @@ const OPS = {
   'lut.ensure': opLutEnsure,
   'lut.acquire': opLutAcquire,
   'texture.mist': opTextureMist,
+  'video.targets': opVideoTargets,
   'video.sourcePreview': opVideoSourcePreview,
   'features.get': opFeaturesGet,
   'features.set': opFeaturesSet,
@@ -6825,6 +7343,10 @@ const OPS = {
   'restore.download': opRestoreDownload,
   'restore.ensure': opRestoreEnsure,
   'grade.nodeReport': opGradeNodeReport,
+  'film.apply': opFilmApply,
+  'texture.film': opTextureFilm,
+  'grade.shotMatch': opGradeShotMatch,
+  'grade.keyCheck': opGradeKeyCheck,
   'style.oneClick': opStyleOneClick,
   'style.catalog': async (ctx, args, signal) => { const { listStyles } = await importFresh('lib/stylelib.mjs'); return { ok: true, styles: listStyles() } },
   'export.qc': opExportQc,
@@ -6847,7 +7369,9 @@ const OPS = {
   'camera.detect': opCameraDetect,
   'camera.fix': opCameraFix,
   'camera.list': opCameraList,
+  'input.audit': opInputAudit,
   'raw.apply': opRawApply,
+  'vibe.apply': opVibeApply,
   'vibe.run': opVibeRun,
   'overlay.plan': opOverlayPlan,
   'overlay.render': opOverlayRender,

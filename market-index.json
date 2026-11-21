@@ -20,8 +20,8 @@
     {
       "name": "davinci-console-demo",
       "description": {
-        "zh": "DaVinci Resolve 调色控制台（DEMO，当前 0.12.2）：灰片还原/官方 LUT 匹配、三层 15 节点调色、10 个风格、黑白柔、遮罩跟踪、交付审批、中文调试日志。需要 macOS + Resolve Studio + Resolve MCP + ffmpeg。",
-        "en": "DaVinci Resolve color console (DEMO): LOG restore with official LUT matching, 3-layer 15-node grade, 10 styles, diffusion, mask/tracking, delivery approval, Chinese debug log. Requires macOS + Resolve Studio + Resolve MCP + ffmpeg."
+        "zh": "DaVinci Resolve 调色控制台（DEMO，当前 0.13.0）：Vibe Color 单入口、Panasonic V-Log 识别、片段级输入色彩空间审计、LUT 输入域校验、三层节点调色、10 个风格、交付审批。需要 macOS + Resolve Studio + Resolve MCP + ffmpeg。",
+        "en": "DaVinci Resolve color console (DEMO, 0.13.0): Vibe Color single entry, Panasonic V-Log detection, per-clip input color space audit, LUT input-domain validation, 3-layer grade, 10 styles, delivery approval. Requires macOS + Resolve Studio + Resolve MCP + ffmpeg."
       },
       "homepage": "https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo",
       "repository": {
@@ -42,6 +42,16 @@
         ]
       },
       "versions": [
+        {
+          "version": "0.13.0",
+          "publishTimestamp": 1795289992,
+          "engines": {
+            "dsh": ">=0.2.2-rc.1"
+          },
+          "source": {
+            "type": "npm"
+          }
+        },
         {
           "version": "0.12.2",
           "publishTimestamp": 1795214585,
