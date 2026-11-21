@@ -7258,7 +7258,7 @@ async function opFeedbackIssue(ctx, args, signal) {
     '',
     '### 环境',
     '```json',
-    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.13.1' }, null, 2),
+    JSON.stringify({ platform: deps?.platform ?? process.platform, mcp: deps?.mcp, resolveApp: deps?.resolveApp, binaries: deps?.binaries, pluginVersion: '0.13.2' }, null, 2),
     '```',
     '',
     '### 调试日志（最近）',
@@ -7266,7 +7266,7 @@ async function opFeedbackIssue(ctx, args, signal) {
     logText || '（无）',
     '```',
   ].join('\n')
-  const url = `https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body.slice(0, 7000))}`
+  const url = `https://github.com/JiangXingchen4210/dsh-davinci-console-demo/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body.slice(0, 7000))}`
   const dir = await ensureDataDir('feedback')
   const file = path.join(dir, `feedback-${stamp()}.md`)
   await fs.writeFile(file, `# ${title}\n\n${body}\n`, 'utf8').catch(() => null)

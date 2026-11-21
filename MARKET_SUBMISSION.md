@@ -4,13 +4,13 @@
 
 | 项 | 内容 |
 |---|---|
-| 插件名称 | davinci-console（达芬奇调色控制台） |
+| 插件名称 | davinci-console（dsh-davinci-console-demo） |
 | npm 包名 | `davinci-console-demo` |
-| 版本 | 0.13.1（DEMO） |
+| 版本 | 0.13.2（DEMO） |
 | 类型 | DSH Web 插件（bundle + client panel） |
 | 平台 | macOS（`os: darwin`） |
 | 许可证 | MIT |
-| 仓库 | https://github.com/JiangXingchen4210/Davinci_MCP_DSH_Demo |
+| 仓库 | https://github.com/JiangXingchen4210/dsh-davinci-console-demo |
 | npm | https://www.npmjs.com/package/davinci-console-demo |
 | 体积 | 498 KB（89 files，解包 1.7 MB） |
 
@@ -57,13 +57,13 @@
 
 ```bash
 # 安装（市场或按包名）
-plugin_manager install_bundle target=davinci-console-demo@0.13.1
+plugin_manager install_bundle target=davinci-console-demo@0.13.2
 # 或 npm
-npm install davinci-console-demo@0.13.1
+npm install davinci-console-demo@0.13.2
 ```
 
 验证步骤：
-1. 启动 DSH → 侧边栏打开「达芬奇调色控制台」；
+1. 启动 DSH → 侧边栏打开「dsh-davinci-console-demo」；
 2. 顶部应显示依赖自检结果（MCP / ffmpeg / Resolve.app）；
 3. 素材交接导入素材 → 运行「工程预检」；
 4. 「还原」→「判断/匹配还原 LUT」→ 选官方 LUT；
@@ -86,8 +86,8 @@ npm install davinci-console-demo@0.13.1
 
 ## 七、提交清单
 
-- [x] npm 包已发布（0.13.1，latest）
-- [x] GitHub 仓库 + tag `v0.13.1`
+- [x] npm 包已发布（0.13.2，latest）
+- [x] GitHub 仓库 + tag `v0.13.2`
 - [x] README / USER_MANUAL / LICENSE
 - [x] 依赖自检与平台守卫
 - [x] 市场要求的截图/GIF：

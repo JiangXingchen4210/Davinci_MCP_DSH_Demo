@@ -1,6 +1,7 @@
-# 达芬奇调色控制台 · 使用手册（v0.13.1）
+# dsh-davinci-console-demo · 使用手册（v0.13.2）
 
-> 插件名：`@local/davinci-console`（DSH Web 侧边栏「插件 → 达芬奇调色控制台」）
+> 显示名：`dsh-davinci-console-demo`（DSH Web 侧边栏「插件 → dsh-davinci-console-demo」）
+> npm 包名：`davinci-console-demo`（保持不变）
 > 后端：DaVinci Resolve Studio **Patched 21.2**（`/Applications/DaVinci Resolve/DaVinci Resolve.app`）+ Resolve MCP
 > 当前规模：**91 个 op**，全部可通过面板或「调试日志」追踪
 

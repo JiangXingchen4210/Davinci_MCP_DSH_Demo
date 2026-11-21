@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({
 
     const DICTIONARIES = {
       zh: {
-        'panel': '达芬奇调色控制台',
+        'panel': 'dsh-davinci-console-demo',
         'media.title': '素材交接（剪辑入口）',
         'media.hint': '把桌面/文件夹里的素材拖进来或填路径，插件会批量导入并自动体检色彩管线',
         'media.import': '导入素材',

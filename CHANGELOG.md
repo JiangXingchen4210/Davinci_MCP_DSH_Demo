@@ -1,3 +1,10 @@
+## 0.13.2 — 品牌迁移：dsh-davinci-console-demo（npm 包名不变）
+
+- GitHub 仓库从 `Davinci_MCP_DSH_Demo` 重命名为 `dsh-davinci-console-demo`（GitHub 旧链接自动重定向）
+- 面板显示名改为 `dsh-davinci-console-demo`；npm 安装名仍为 `davinci-console-demo`，老用户升级不断
+- 同步更新 README、USER_MANUAL、market-index、市场提交材料、插件内反馈链接和 package repository/homepage
+- 显示名迁移不改 client id，避免 DSH 客户端模块匹配失败
+
 ## 0.13.1 — Vibe 单入口兼容非 RCM 项目
 
 - **非色彩管理项目**：`vibe.apply` 在项目不是 RCM 时先对每个片段调用 `camera.fix`，把 LOG→709 LUT 挂到 Node1，再建基础校正/风格/镜头匹配；RCM 项目仍由项目输入变换接管，不重复挂 LUT
